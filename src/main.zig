@@ -41,13 +41,19 @@ pub fn main() !void {
     var input_char: u8 = 0;
     try stdout.writeAll("\x1B[?25l");
 
+    var cwd_buffer: [4096]u8 = undefined;
+    const cwd_path = try std.process.getCwd(&cwd_buffer);
+    state.cwd_name = std.fs.path.basename(cwd_path);
+
     // Main loop
     while (state.running) : (input_char = try stdin.readByte()) {
-        var cwd_buffer: [4096]u8 = undefined;
-        const cwd_path = try std.process.getCwd(&cwd_buffer);
-        state.cwd_name = std.fs.path.basename(cwd_path);
-
-        try sea.handleInput(input_char, &state, &dir_list, &file_list);
+        try sea.handleInput(
+            input_char,
+            &state,
+            &dir_list,
+            &file_list,
+            &cwd_buffer,
+        );
         if (!state.running) break;
 
         // Reset colors and clear screen

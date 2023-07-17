@@ -27,7 +27,7 @@ pub fn deinit(stdin: std.fs.File, state: State) void {
     };
 }
 
-pub fn handleInput(input: u8, state: *State, dir_list: *EntryList, file_list: *EntryList) !void {
+pub fn handleInput(input: u8, state: *State, dir_list: *EntryList, file_list: *EntryList, buffer: []u8) !void {
     const total_items = dir_list.getTotalEntries() + file_list.getTotalEntries();
     const total_items_index = if (total_items != 0) total_items - 1 else 0;
 
@@ -38,6 +38,9 @@ pub fn handleInput(input: u8, state: *State, dir_list: *EntryList, file_list: *E
             clearEntries(dir_list, file_list);
             state.cursor = try appendAboveEntries(dir_list, file_list, state.cwd_name);
             try std.process.changeCurDir("..");
+
+            const path = try std.process.getCwd(buffer);
+            state.cwd_name = std.fs.path.basename(path);
         },
         'j' => state.cursor += if (state.cursor != total_items_index) 1 else 0,
         'k' => state.cursor -= if (state.cursor != 0) 1 else 0,
@@ -45,7 +48,11 @@ pub fn handleInput(input: u8, state: *State, dir_list: *EntryList, file_list: *E
             if (state.cursor < dir_list.getTotalEntries()) {
                 const name = dir_list.getNameAtEntryIndex(state.cursor);
                 state.cursor = 0;
+
                 try std.process.changeCurDir(name);
+                const path = try std.process.getCwd(buffer);
+                state.cwd_name = std.fs.path.basename(path);
+
                 clearEntries(dir_list, file_list);
                 try appendCwdEntries(dir_list, file_list);
             }
