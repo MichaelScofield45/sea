@@ -38,7 +38,7 @@ pub fn main() !void {
     try sea.init(stdin_file, &state);
     defer sea.deinit(stdin_file, state);
 
-    var input_char: u8 = undefined;
+    var input_char: u8 = 0;
     try stdout.writeAll("\x1B[?25l");
 
     // Main loop
