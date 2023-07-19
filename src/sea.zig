@@ -23,13 +23,7 @@ pub fn init(stdin: std.fs.File, state: *State) !void {
     new.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
     try std.os.tcsetattr(stdin.handle, .FLUSH, new);
 
-    var size = std.mem.zeroes(linux.winsize);
-    _ = linux.ioctl(stdin.handle, linux.T.IOCGWINSZ, @intFromPtr(&size));
-
-    state.dims = .{
-        .cols = size.ws_col,
-        .rows = size.ws_row,
-    };
+    state.dims = try getTerminalSize(stdin.handle);
 }
 
 pub fn deinit(stdin: std.fs.File, state: State) void {
@@ -37,6 +31,65 @@ pub fn deinit(stdin: std.fs.File, state: State) void {
         std.log.err("unexpected error at shutdown: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
+}
+
+// Using std.meta things seems sketchy
+fn getTerminalSize(stdin_handle: std.os.fd_t) !std.meta.FieldType(State, .dims) {
+    var size: linux.winsize = undefined;
+    // TODO: Handle error with errno
+    _ = linux.ioctl(stdin_handle, linux.T.IOCGWINSZ, @intFromPtr(&size));
+
+    return .{
+        .cols = size.ws_col,
+        .rows = size.ws_row,
+    };
+}
+
+pub fn printEntries(writer: anytype, state: State, dir_list: EntryList, file_list: EntryList) !void {
+    const height = state.dims.rows - 6;
+    const total_items = dir_list.getTotalEntries() + file_list.getTotalEntries();
+
+    var d_start: usize = 0;
+    var d_end: usize = dir_list.getTotalEntries();
+    var f_start: usize = 0;
+    var f_end: usize = file_list.getTotalEntries();
+
+    if (state.cursor > height) {
+        // This works because integer division loses fractional information.
+        // Normal math would dictate that this is redundant.
+        const start = height * (state.cursor / height);
+        const end = if (total_items - start < height) total_items - start else start + height;
+        if (start > dir_list.getTotalEntries()) {
+            d_start = 0;
+            d_end = 0;
+            f_start = start;
+            f_end = end;
+        } else {
+            d_start = start;
+            d_end = dir_list.getTotalEntries();
+            f_start = end - dir_list.getTotalEntries();
+            f_end = end;
+        }
+    }
+
+    for (dir_list.getEndIndices()[d_start..d_end], 0..) |_, entry_idx| {
+        if (entry_idx == state.cursor)
+            try writer.writeAll("\x1B[30;44m")
+        else
+            try writer.writeAll("\x1B[1;34;49m");
+
+        try writer.print("{s}\x1B[1E", .{dir_list.getNameAtEntryIndex(entry_idx)});
+    }
+
+    try writer.writeAll("\x1B[0m");
+    for (file_list.getEndIndices()[f_start..f_end], 0..) |_, entry_idx| {
+        if (entry_idx + dir_list.getTotalEntries() == state.cursor)
+            try writer.writeAll("\x1B[30;47m")
+        else
+            try writer.writeAll("\x1B[0m");
+
+        try writer.print("{s}\x1B[1E", .{file_list.getNameAtEntryIndex(entry_idx)});
+    }
 }
 
 pub fn handleInput(input: u8, state: *State, dir_list: *EntryList, file_list: *EntryList, buffer: []u8) !void {

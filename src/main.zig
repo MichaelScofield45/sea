@@ -78,24 +78,7 @@ pub fn main() !void {
         try config.setColor(stdout, .bold);
 
         // TODO: Handle logic for scrolling
-        for (dir_list.getEndIndices(), 0..) |_, entry_idx| {
-            if (entry_idx == state.cursor)
-                try stdout.writeAll("\x1B[30;44m")
-            else
-                try stdout.writeAll("\x1B[1;34;49m");
-
-            try stdout.print("{s}\x1B[1E", .{dir_list.getNameAtEntryIndex(entry_idx)});
-        }
-
-        try config.setColor(stdout, .reset);
-        for (file_list.getEndIndices(), 0..) |_, entry_idx| {
-            if (entry_idx + dir_list.getTotalEntries() == state.cursor)
-                try stdout.writeAll("\x1B[30;47m")
-            else
-                try stdout.writeAll("\x1B[0m");
-
-            try stdout.print("{s}\x1B[1E", .{file_list.getNameAtEntryIndex(entry_idx)});
-        }
+        try sea.printEntries(stdout, state, dir_list, file_list);
 
         try bw.flush();
     }
