@@ -7,6 +7,10 @@ pub const State = struct {
     running: bool,
     cwd_name: []const u8,
     original_termios: std.os.termios,
+    dims: struct {
+        cols: u32,
+        rows: u32,
+    },
 };
 
 pub fn init(stdin: std.fs.File, state: *State) !void {
@@ -18,6 +22,14 @@ pub fn init(stdin: std.fs.File, state: *State) !void {
     new.cflag |= (linux.CS8);
     new.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
     try std.os.tcsetattr(stdin.handle, .FLUSH, new);
+
+    var size = std.mem.zeroes(linux.winsize);
+    _ = linux.ioctl(stdin.handle, linux.T.IOCGWINSZ, @intFromPtr(&size));
+
+    state.dims = .{
+        .cols = size.ws_col,
+        .rows = size.ws_row,
+    };
 }
 
 pub fn deinit(stdin: std.fs.File, state: State) void {

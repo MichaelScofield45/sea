@@ -33,6 +33,7 @@ pub fn main() !void {
         .running = true,
         .cwd_name = undefined,
         .original_termios = undefined,
+        .dims = undefined,
     };
 
     try sea.init(stdin_file, &state);
@@ -65,6 +66,11 @@ pub fn main() !void {
                 file_list.names.allocatedSlice().len +
                 file_list.end_indices.allocatedSlice().len),
         });
+
+        try stdout.print(
+            "Terminal size: {} rows, {} cols\x1B[2E",
+            .{ state.dims.rows, state.dims.cols },
+        );
 
         try stdout.print("Cursor selection index: {}\x1B[2E", .{state.cursor});
 
