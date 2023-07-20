@@ -19,7 +19,7 @@ pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize) !Self {
     };
 }
 
-pub fn getTotalEntries(self: Self) usize {
+pub fn len(self: Self) usize {
     return self.end_indices.items.len;
 }
 
