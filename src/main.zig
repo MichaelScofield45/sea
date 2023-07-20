@@ -1,9 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
-const EntryList = @import("entry_list.zig");
-
-const sea = @import("sea.zig");
-const State = sea.State;
+const Sea = @import("sea.zig");
 
 pub fn main() !void {
     const stdout_file = std.io.getStdOut();
@@ -16,69 +13,51 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var dir_list = try EntryList.initCapacity(allocator, 1024);
-    defer dir_list.deinit();
-
-    var file_list = try EntryList.initCapacity(allocator, 1024);
-    defer file_list.deinit();
-
-    try sea.appendCwdEntries(&dir_list, &file_list);
-
     const stdin_file = std.io.getStdIn();
     const stdin = stdin_file.reader();
 
-    // Setup terminal and state
-    var state = State{
-        .cursor = 0,
-        .running = true,
-        .cwd_name = undefined,
-        .original_termios = undefined,
-        .dims = undefined,
-    };
+    var sea = try Sea.init(allocator, stdin_file);
+    defer sea.deinit();
 
-    try sea.init(stdin_file, &state);
-    defer sea.deinit(stdin_file, state);
+    try sea.appendCwdEntries();
 
     var input_char: u8 = 0;
     try stdout.writeAll("\x1B[?25l");
 
     var cwd_buffer: [4096]u8 = undefined;
     const cwd_path = try std.process.getCwd(&cwd_buffer);
-    state.cwd_name = std.fs.path.basename(cwd_path);
+    sea.cwd_name = std.fs.path.basename(cwd_path);
 
     // Main loop
-    while (state.running) : (input_char = try stdin.readByte()) {
-        try sea.handleInput(
-            input_char,
-            &state,
-            &dir_list,
-            &file_list,
-            &cwd_buffer,
-        );
-        if (!state.running) break;
+    while (sea.running) : (input_char = try stdin.readByte()) {
+        var timer = try std.time.Timer.start();
+
+        try sea.handleInput(input_char, &cwd_buffer);
+        if (!sea.running) break;
+
+        const end = timer.read();
 
         // Reset colors and clear screen
         try stdout.writeAll("\x1B[0m\x1B[2J\x1B[H");
 
+        try stdout.print("Loop time: {}\x1B[1E", .{std.fmt.fmtDuration(end)});
         try stdout.print("Memory allocated: {d:.1}\x1B[1E", .{
-            std.fmt.fmtIntSizeDec(dir_list.names.allocatedSlice().len +
-                dir_list.end_indices.allocatedSlice().len +
-                file_list.names.allocatedSlice().len +
-                file_list.end_indices.allocatedSlice().len),
+            std.fmt.fmtIntSizeDec(sea.dir_list.names.allocatedSlice().len +
+                sea.dir_list.end_indices.allocatedSlice().len +
+                sea.file_list.names.allocatedSlice().len +
+                sea.file_list.end_indices.allocatedSlice().len),
         });
 
-        try stdout.print(
-            "Terminal size: {} rows, {} cols\x1B[2E",
-            .{ state.dims.rows, state.dims.cols },
-        );
+        try stdout.print("Terminal size: {} rows\x1B[1E", .{sea.s_win.height});
+        try stdout.print("Scroll window: {}\x1B[1E", .{sea.s_win});
 
-        try stdout.print("Cursor selection index: {}\x1B[2E", .{state.cursor});
+        try stdout.print("Cursor selection index: {}\x1B[2E", .{sea.cursor});
 
         try config.setColor(stdout, .blue);
         try config.setColor(stdout, .bold);
 
         // TODO: Handle logic for scrolling
-        try sea.printEntries(stdout, state, dir_list, file_list);
+        try sea.printEntries(stdout);
 
         try bw.flush();
     }

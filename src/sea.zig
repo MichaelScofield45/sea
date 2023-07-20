@@ -2,158 +2,178 @@ const std = @import("std");
 const linux = std.os.linux;
 const EntryList = @import("entry_list.zig");
 
-pub const State = struct {
-    cursor: usize,
-    running: bool,
-    cwd_name: []const u8,
-    original_termios: std.os.termios,
-    dims: struct {
-        cols: u32,
-        rows: u32,
-    },
-};
+stdin: std.fs.File,
+dir_list: EntryList,
+file_list: EntryList,
+cursor: usize,
+/// Scroll window for smooth scrolling and rendering
+s_win: struct {
+    height: u32,
+    start: u32,
+    end: u32,
+},
+running: bool,
+cwd_name: []const u8,
+original_termios: std.os.termios,
 
-pub fn init(stdin: std.fs.File, state: *State) !void {
-    state.original_termios = try std.os.tcgetattr(stdin.handle);
+const Self = @This();
 
-    var new = state.original_termios;
+pub fn init(allocator: std.mem.Allocator, stdin: std.fs.File) !Self {
+    var original_termios = try std.os.tcgetattr(stdin.handle);
+
+    var new = original_termios;
     new.iflag &= ~(linux.BRKINT | linux.ICRNL | linux.INPCK | linux.ISTRIP | linux.IXON);
     new.oflag &= ~(linux.OPOST);
     new.cflag |= (linux.CS8);
     new.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
     try std.os.tcsetattr(stdin.handle, .FLUSH, new);
 
-    state.dims = try getTerminalSize(stdin.handle);
+    return .{
+        .stdin = stdin,
+        .cursor = 0,
+        .running = true,
+        .cwd_name = undefined,
+        .original_termios = original_termios,
+        .s_win = .{
+            .height = try getTerminalSize(stdin.handle) - 6,
+            .start = 0,
+            .end = 0,
+        },
+        .dir_list = try EntryList.initCapacity(allocator, 1024),
+        .file_list = try EntryList.initCapacity(allocator, 1024),
+    };
 }
 
-pub fn deinit(stdin: std.fs.File, state: State) void {
-    std.os.tcsetattr(stdin.handle, .FLUSH, state.original_termios) catch |err| {
+pub fn deinit(self: *Self) void {
+    std.os.tcsetattr(self.stdin.handle, .FLUSH, self.original_termios) catch |err| {
         std.log.err("unexpected error at shutdown: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
+
+    self.dir_list.deinit();
+    self.file_list.deinit();
 }
 
-// Using std.meta things seems sketchy
-fn getTerminalSize(stdin_handle: std.os.fd_t) !std.meta.FieldType(State, .dims) {
+fn getTerminalSize(stdin_handle: std.os.fd_t) !u32 {
     var size: linux.winsize = undefined;
     // TODO: Handle error with errno
-    _ = linux.ioctl(stdin_handle, linux.T.IOCGWINSZ, @intFromPtr(&size));
+    if (linux.ioctl(stdin_handle, linux.T.IOCGWINSZ, @intFromPtr(&size)) != 0)
+        return error.IoctlError;
 
-    return .{
-        .cols = size.ws_col,
-        .rows = size.ws_row,
-    };
+    return @as(u32, size.ws_row);
 }
 
-pub fn printEntries(writer: anytype, state: State, dir_list: EntryList, file_list: EntryList) !void {
-    const height = state.dims.rows - 6;
-    const total_items = dir_list.getTotalEntries() + file_list.getTotalEntries();
-
-    var d_start: usize = 0;
-    var d_end: usize = dir_list.getTotalEntries();
-    var f_start: usize = 0;
-    var f_end: usize = file_list.getTotalEntries();
-
-    if (state.cursor > height) {
-        // This works because integer division loses fractional information.
-        // Normal math would dictate that this is redundant.
-        const start = height * (state.cursor / height);
-        const end = if (total_items - start < height) total_items - start else start + height;
-        if (start > dir_list.getTotalEntries()) {
-            d_start = 0;
-            d_end = 0;
-            f_start = start;
-            f_end = end;
-        } else {
-            d_start = start;
-            d_end = dir_list.getTotalEntries();
-            f_start = end - dir_list.getTotalEntries();
-            f_end = end;
-        }
-    }
-
-    for (dir_list.getEndIndices()[d_start..d_end], 0..) |_, entry_idx| {
-        if (entry_idx == state.cursor)
+pub fn printEntries(self: Self, writer: anytype) !void {
+    for (self.dir_list.getEndIndices(), 0..) |_, entry_idx| {
+        if (entry_idx == self.cursor)
             try writer.writeAll("\x1B[30;44m")
         else
             try writer.writeAll("\x1B[1;34;49m");
 
-        try writer.print("{s}\x1B[1E", .{dir_list.getNameAtEntryIndex(entry_idx)});
+        try writer.print("{s}\x1B[1E", .{self.dir_list.getNameAtEntryIndex(entry_idx)});
     }
 
     try writer.writeAll("\x1B[0m");
-    for (file_list.getEndIndices()[f_start..f_end], 0..) |_, entry_idx| {
-        if (entry_idx + dir_list.getTotalEntries() == state.cursor)
+    for (self.file_list.getEndIndices(), 0..) |_, entry_idx| {
+        if (entry_idx + self.dir_list.getTotalEntries() == self.cursor)
             try writer.writeAll("\x1B[30;47m")
         else
             try writer.writeAll("\x1B[0m");
 
-        try writer.print("{s}\x1B[1E", .{file_list.getNameAtEntryIndex(entry_idx)});
+        try writer.print("{s}\x1B[1E", .{self.file_list.getNameAtEntryIndex(entry_idx)});
     }
 }
 
-pub fn handleInput(input: u8, state: *State, dir_list: *EntryList, file_list: *EntryList, buffer: []u8) !void {
-    const total_items = dir_list.getTotalEntries() + file_list.getTotalEntries();
+pub fn clearEntries(self: *Self) void {
+    self.dir_list.names.clearRetainingCapacity();
+    self.dir_list.end_indices.clearRetainingCapacity();
+    self.file_list.names.clearRetainingCapacity();
+    self.file_list.end_indices.clearRetainingCapacity();
+}
+
+pub fn handleInput(self: *Self, input: u8, buffer: []u8) !void {
+    const total_items = self.dir_list.getTotalEntries() + self.file_list.getTotalEntries();
     const total_items_index = if (total_items != 0) total_items - 1 else 0;
 
     switch (input) {
-        'q' => state.running = false,
+        'q' => self.running = false,
         'h' => {
-            // state.cursor = 0;
-            clearEntries(dir_list, file_list);
-            state.cursor = try appendAboveEntries(dir_list, file_list, state.cwd_name);
+            self.clearEntries();
+            self.cursor = try self.appendAboveEntries();
             try std.process.changeCurDir("..");
 
             const path = try std.process.getCwd(buffer);
-            state.cwd_name = std.fs.path.basename(path);
+            self.cwd_name = std.fs.path.basename(path);
         },
-        'j' => state.cursor += if (state.cursor != total_items_index) 1 else 0,
-        'k' => state.cursor -= if (state.cursor != 0) 1 else 0,
+        'j' => {
+            self.cursor = if (self.cursor != total_items_index)
+                self.cursor + 1
+            else
+                0;
+
+            if (self.cursor > self.s_win.end) {
+                self.s_win.end = @intCast(self.cursor);
+                self.s_win.start = self.s_win.end - self.s_win.height;
+            }
+        },
+        'k' => {
+            self.cursor = if (self.cursor != 0)
+                self.cursor - 1
+            else
+                total_items_index;
+
+            if (self.cursor > self.s_win.end) {
+                self.s_win.end = @intCast(self.cursor);
+                self.s_win.start = self.s_win.end - self.s_win.height;
+            }
+        },
         'l' => {
-            if (state.cursor < dir_list.getTotalEntries()) {
-                const name = dir_list.getNameAtEntryIndex(state.cursor);
-                state.cursor = 0;
+            if (self.cursor < self.dir_list.getTotalEntries()) {
+                const name = self.dir_list.getNameAtEntryIndex(self.cursor);
+                self.cursor = 0;
 
                 try std.process.changeCurDir(name);
                 const path = try std.process.getCwd(buffer);
-                state.cwd_name = std.fs.path.basename(path);
+                self.cwd_name = std.fs.path.basename(path);
 
-                clearEntries(dir_list, file_list);
-                try appendCwdEntries(dir_list, file_list);
+                self.clearEntries();
+                try self.appendCwdEntries();
             }
         },
+        'g' => self.cursor = 0,
+        'G' => self.cursor = total_items_index,
         else => {},
     }
 }
 
-pub fn clearEntries(dir_list: *EntryList, file_list: *EntryList) void {
-    dir_list.names.clearRetainingCapacity();
-    dir_list.end_indices.clearRetainingCapacity();
-    file_list.names.clearRetainingCapacity();
-    file_list.end_indices.clearRetainingCapacity();
-}
-
-pub fn appendCwdEntries(dir_list: *EntryList, file_list: *EntryList) !void {
+pub fn appendCwdEntries(self: *Self) !void {
     var iterable_dir = try std.fs.cwd().openIterableDir(".", .{});
     defer iterable_dir.close();
 
     // Store in ArrayLists
-    {
-        // Iter current dir
-        var it = iterable_dir.iterate();
-        while (try it.next()) |entry| {
-            if (entry.kind == .directory) {
-                try dir_list.append(entry.name);
-            } else {
-                try file_list.append(entry.name);
-            }
+    // Iter current dir
+    var it = iterable_dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind == .directory and !std.mem.startsWith(u8, entry.name, ".")) {
+            try self.dir_list.append(entry.name);
+        } else {
+            if (!std.mem.startsWith(u8, entry.name, "."))
+                try self.file_list.append(entry.name);
         }
     }
+
+    self.s_win.end = blk: {
+        const len = self.dir_list.getTotalEntries() + self.file_list.getTotalEntries();
+        if (len < self.s_win.height)
+            break :blk @intCast(len)
+        else
+            break :blk self.s_win.height;
+    };
 }
 
 /// Appends all entries of the above directory, returning which entry matches the
 /// current working directory
-pub fn appendAboveEntries(dir_list: *EntryList, file_list: *EntryList, cwd: []const u8) !usize {
+pub fn appendAboveEntries(self: *Self) !usize {
     var iterable_dir = try std.fs.cwd().openIterableDir("..", .{});
     defer iterable_dir.close();
 
@@ -163,14 +183,23 @@ pub fn appendAboveEntries(dir_list: *EntryList, file_list: *EntryList, cwd: []co
     var count: usize = 0;
 
     while (try it.next()) |entry| {
-        if (entry.kind == .directory) {
-            try dir_list.append(entry.name);
-            if (std.mem.eql(u8, cwd, entry.name)) match = count;
+        if (entry.kind == .directory and !std.mem.startsWith(u8, entry.name, ".")) {
+            try self.dir_list.append(entry.name);
+            if (std.mem.eql(u8, self.cwd_name, entry.name)) match = count;
             count += 1;
         } else {
-            try file_list.append(entry.name);
+            if (!std.mem.startsWith(u8, entry.name, "."))
+                try self.file_list.append(entry.name);
         }
     }
+
+    self.s_win.end = blk: {
+        const len = self.dir_list.getTotalEntries() + self.file_list.getTotalEntries();
+        if (len < self.s_win.height)
+            break :blk @intCast(len)
+        else
+            break :blk self.s_win.height;
+    };
 
     if (match) |index|
         return index
