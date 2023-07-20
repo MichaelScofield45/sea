@@ -9,7 +9,6 @@ cursor: usize,
 /// Scroll window for smooth scrolling and rendering
 s_win: struct {
     height: u32,
-    start: u32,
     end: u32,
 },
 running: bool,
@@ -35,8 +34,7 @@ pub fn init(allocator: std.mem.Allocator, stdin: std.fs.File) !Self {
         .cwd_name = undefined,
         .original_termios = original_termios,
         .s_win = .{
-            .height = try getTerminalSize(stdin.handle) - 6,
-            .start = 0,
+            .height = try getTerminalSize(stdin.handle) - 7,
             .end = 0,
         },
         .dir_list = try EntryList.initCapacity(allocator, 1024),
@@ -63,24 +61,69 @@ fn getTerminalSize(stdin_handle: std.os.fd_t) !u32 {
     return @as(u32, size.ws_row);
 }
 
-pub fn printEntries(self: Self, writer: anytype) !void {
-    for (self.dir_list.getEndIndices(), 0..) |_, entry_idx| {
-        if (entry_idx == self.cursor)
-            try writer.writeAll("\x1B[30;44m")
-        else
-            try writer.writeAll("\x1B[1;34;49m");
+fn getScrollSlices(self: Self) !struct {
+    dirs: ?[]const usize,
+    files: ?[]const usize,
+    dir_start: usize,
+    file_start: usize,
+} {
+    const items_len = self.dir_list.len() + self.file_list.len();
+    const height = if (self.s_win.height > items_len) items_len else self.s_win.height;
+    const end = self.s_win.end;
 
-        try writer.print("{s}\x1B[1E", .{self.dir_list.getNameAtEntryIndex(entry_idx)});
+    if (end < self.dir_list.len()) {
+        return .{
+            .dirs = self.dir_list.getEndIndices()[end - height .. end],
+            .files = null,
+            .dir_start = end - height,
+            .file_start = 0,
+        };
+    } else if (end - height > self.dir_list.len()) {
+        return .{
+            .dirs = null,
+            .files = self.file_list.getEndIndices()[end - height .. end],
+            .dir_start = 0,
+            .file_start = end - height,
+        };
+    } else {
+        const start = end - height;
+        const n_dirs = self.dir_list.len() - start;
+        const n_files = height - n_dirs;
+        std.debug.print("{}, {}, {}\n", .{ start, n_dirs, n_files });
+
+        return .{
+            .dirs = self.dir_list.getEndIndices()[start..][0..n_dirs],
+            .files = self.file_list.getEndIndices()[0..][0..n_files],
+            .dir_start = start,
+            .file_start = 0,
+        };
+    }
+}
+
+pub fn printEntries(self: Self, writer: anytype) !void {
+    const idxs = try self.getScrollSlices();
+
+    if (idxs.dirs) |dirs| {
+        for (dirs, idxs.dir_start..) |_, entry_idx| {
+            if (entry_idx == self.cursor)
+                try writer.writeAll("\x1B[30;44m")
+            else
+                try writer.writeAll("\x1B[1;34;49m");
+
+            try writer.print("{s}\x1B[1E", .{self.dir_list.getNameAtEntryIndex(entry_idx)});
+        }
     }
 
     try writer.writeAll("\x1B[0m");
-    for (self.file_list.getEndIndices(), 0..) |_, entry_idx| {
-        if (entry_idx + self.dir_list.getTotalEntries() == self.cursor)
-            try writer.writeAll("\x1B[30;47m")
-        else
-            try writer.writeAll("\x1B[0m");
+    if (idxs.files) |files| {
+        for (files, idxs.file_start..) |_, entry_idx| {
+            if (entry_idx + self.dir_list.len() == self.cursor)
+                try writer.writeAll("\x1B[30;47m")
+            else
+                try writer.writeAll("\x1B[0m");
 
-        try writer.print("{s}\x1B[1E", .{self.file_list.getNameAtEntryIndex(entry_idx)});
+            try writer.print("{s}\x1B[1E", .{self.file_list.getNameAtEntryIndex(entry_idx)});
+        }
     }
 }
 
@@ -92,7 +135,7 @@ pub fn clearEntries(self: *Self) void {
 }
 
 pub fn handleInput(self: *Self, input: u8, buffer: []u8) !void {
-    const total_items = self.dir_list.getTotalEntries() + self.file_list.getTotalEntries();
+    const total_items = self.dir_list.len() + self.file_list.len();
     const total_items_index = if (total_items != 0) total_items - 1 else 0;
 
     switch (input) {
@@ -105,30 +148,18 @@ pub fn handleInput(self: *Self, input: u8, buffer: []u8) !void {
             const path = try std.process.getCwd(buffer);
             self.cwd_name = std.fs.path.basename(path);
         },
-        'j' => {
-            self.cursor = if (self.cursor != total_items_index)
-                self.cursor + 1
-            else
-                0;
-
-            if (self.cursor > self.s_win.end) {
-                self.s_win.end = @intCast(self.cursor);
-                self.s_win.start = self.s_win.end - self.s_win.height;
-            }
-        },
+        'j' => self.cursor = if (self.cursor != total_items_index)
+            self.cursor + 1
+        else
+            0,
         'k' => {
             self.cursor = if (self.cursor != 0)
                 self.cursor - 1
             else
                 total_items_index;
-
-            if (self.cursor > self.s_win.end) {
-                self.s_win.end = @intCast(self.cursor);
-                self.s_win.start = self.s_win.end - self.s_win.height;
-            }
         },
         'l' => {
-            if (self.cursor < self.dir_list.getTotalEntries()) {
+            if (self.cursor < self.dir_list.len()) {
                 const name = self.dir_list.getNameAtEntryIndex(self.cursor);
                 self.cursor = 0;
 
@@ -143,6 +174,15 @@ pub fn handleInput(self: *Self, input: u8, buffer: []u8) !void {
         'g' => self.cursor = 0,
         'G' => self.cursor = total_items_index,
         else => {},
+    }
+
+    const len = self.dir_list.len() + self.file_list.len();
+    const relative_height = if (self.s_win.height > len) len else self.s_win.height;
+
+    if (self.cursor >= self.s_win.end) {
+        self.s_win.end = @intCast(self.cursor + 1);
+    } else if (self.cursor < self.s_win.end - relative_height) {
+        self.s_win.end = @as(u32, @intCast(self.cursor)) + self.s_win.height;
     }
 }
 
@@ -163,11 +203,12 @@ pub fn appendCwdEntries(self: *Self) !void {
     }
 
     self.s_win.end = blk: {
-        const len = self.dir_list.getTotalEntries() + self.file_list.getTotalEntries();
-        if (len < self.s_win.height)
-            break :blk @intCast(len)
-        else
+        const len = self.dir_list.len() + self.file_list.len();
+        if (len < self.s_win.height) {
+            break :blk @intCast(len);
+        } else {
             break :blk self.s_win.height;
+        }
     };
 }
 
@@ -194,11 +235,12 @@ pub fn appendAboveEntries(self: *Self) !usize {
     }
 
     self.s_win.end = blk: {
-        const len = self.dir_list.getTotalEntries() + self.file_list.getTotalEntries();
-        if (len < self.s_win.height)
-            break :blk @intCast(len)
-        else
+        const len = self.dir_list.len() + self.file_list.len();
+        if (len < self.s_win.height) {
+            break :blk @intCast(len);
+        } else {
             break :blk self.s_win.height;
+        }
     };
 
     if (match) |index|
