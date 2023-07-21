@@ -42,10 +42,10 @@ pub fn main() !void {
 
         try stdout.print("Loop time: {}\x1B[1E", .{std.fmt.fmtDuration(end)});
         try stdout.print("Memory allocated: {d:.1}\x1B[1E", .{
-            std.fmt.fmtIntSizeDec(sea.dir_list.names.allocatedSlice().len +
-                sea.dir_list.end_indices.allocatedSlice().len +
-                sea.file_list.names.allocatedSlice().len +
-                sea.file_list.end_indices.allocatedSlice().len),
+            std.fmt.fmtIntSizeDec(sea.dirs.names.allocatedSlice().len +
+                sea.dirs.end_indices.allocatedSlice().len +
+                sea.files.names.allocatedSlice().len +
+                sea.files.end_indices.allocatedSlice().len),
         });
 
         try stdout.print("Terminal size: {} rows\x1B[1E", .{sea.s_win.height});

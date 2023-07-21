@@ -36,7 +36,6 @@ pub fn getNameAtEntryIndex(self: Self, index: usize) []const u8 {
 
 pub fn append(self: *Self, name: []const u8) !void {
     try self.names.appendSlice(name);
-    // std.debug.print("{}\n", .{self.names.items.len});
     try self.end_indices.append(self.names.items.len);
 }
 
