@@ -5,7 +5,10 @@ const Sea = @import("sea.zig");
 pub fn main() !void {
     const stdout_file = std.io.getStdOut();
     const config = std.io.tty.detectConfig(stdout_file);
-    _ = config;
+    if (config == .no_color) {
+        std.log.err("your terminal does not support ANSI escape code sequences", .{});
+        std.process.exit(1);
+    }
 
     var bw = std.io.bufferedWriter(stdout_file.writer());
     const stdout = bw.writer();
@@ -50,10 +53,6 @@ pub fn main() !void {
         try stdout.print("Scroll window: {}\x1B[1E", .{sea.s_win});
         try stdout.print("Cursor selection index: {}\x1B[2E", .{sea.cursor});
 
-        // try config.setColor(stdout, .blue);
-        // try config.setColor(stdout, .bold);
-
-        // TODO: Handle logic for scrolling
         try sea.printEntries(stdout);
 
         try bw.flush();
