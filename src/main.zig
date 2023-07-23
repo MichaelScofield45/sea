@@ -75,10 +75,10 @@ pub fn main() !void {
             std.process.exit(1);
         };
 
-        std.fs.makeDirAbsolute(dirname) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        var root = try std.fs.openDirAbsolute("/", .{});
+        defer root.close();
+
+        try root.makePath(dirname);
 
         const file = try std.fs.createFileAbsolute(lastd_file, .{});
         defer file.close();
