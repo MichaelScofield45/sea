@@ -32,6 +32,13 @@ pub fn main() !void {
     const cwd_path = try std.process.getCwd(&cwd_buffer);
     sea.cwd_name = std.fs.path.basename(cwd_path);
 
+    // Setup cd on quit if available
+    var cd_quit: ?[]const u8 = null;
+    defer if (cd_quit) |allocation| allocator.free(allocation);
+
+    if (std.process.hasEnvVarConstant("SEA_TMPFILE"))
+        cd_quit = try std.process.getEnvVarOwned(allocator, "SEA_TMPFILE");
+
     // Main loop
     while (sea.running) : (input_char = try stdin.readByte()) {
         var timer = try std.time.Timer.start();
@@ -60,4 +67,21 @@ pub fn main() !void {
 
     // Reset colors, clear screen, go home, and enable cursor again
     try stdout_file.writeAll("\x1B[0m\x1B[2J\x1B[H\x1B[?25h");
+
+    if (cd_quit) |lastd_file| {
+        const dirname = std.fs.path.dirname(lastd_file) orelse {
+            std.log.err("could not get config directory for cd on quit, given" ++
+                "directory is: {s}", .{lastd_file});
+            std.process.exit(1);
+        };
+
+        std.fs.makeDirAbsolute(dirname) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const file = try std.fs.createFileAbsolute(lastd_file, .{});
+        defer file.close();
+        try file.writer().print("cd {s}", .{try std.process.getCwd(&cwd_buffer)});
+    }
 }
