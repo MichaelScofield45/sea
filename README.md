@@ -30,3 +30,5 @@ Or add `zig-out/bin/` to your `$PATH` environment variable.
 | `j` | go down one entry in current directory |
 | `k` | go up one entry in current directory |
 | `l` | go right (enter directory selected) |
+| `g` | go to top |
+| `G` | go to bottom |
