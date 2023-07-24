@@ -43,7 +43,7 @@ pub fn main() !void {
     while (sea.running) : (input_char = try stdin.readByte()) {
         var timer = try std.time.Timer.start();
 
-        try sea.handleInput(allocator, input_char, &cwd_buffer);
+        try sea.handleInput(allocator, stdin, input_char, &cwd_buffer);
         if (!sea.running) break;
 
         const end = timer.read();

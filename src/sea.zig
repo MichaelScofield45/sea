@@ -96,13 +96,44 @@ pub fn clearEntries(self: *Self) void {
     self.entries.indices.clearRetainingCapacity();
 }
 
-pub fn handleInput(self: *Self, allocator: Allocator, input: u8, buffer: []u8) !void {
+pub fn handleInput(
+    self: *Self,
+    allocator: Allocator,
+    stdin: anytype,
+    input: u8,
+    buffer: []u8,
+) !void {
     const len = self.entries.len();
     const total_index = if (len != 0) len - 1 else 0;
 
-    switch (input) {
-        'q' => self.running = false,
-        'h' => {
+    const Key = enum(u8) {
+        init = 0,
+        q = 'q',
+        h = 'h',
+        j = 'j',
+        k = 'k',
+        l = 'l',
+        g = 'g',
+        G = 'G',
+        arrow_up = 0x41,
+        arrow_down = 0x42,
+        arrow_right = 0x43,
+        arrow_left = 0x44,
+
+        fn enumFromInt(int: u8) @This() {
+            return @as(@This(), @enumFromInt(int));
+        }
+    };
+
+    const real_input = if (input == 0x1b and (try stdin.readByte() == 0x5b))
+        @as(Key, @enumFromInt(try stdin.readByte()))
+    else
+        @as(Key, @enumFromInt(input));
+
+    switch (real_input) {
+        .init => {},
+        .q => self.running = false,
+        .h, .arrow_left => {
             self.clearEntries();
             self.cursor = try self.appendAboveEntries(allocator);
             try std.process.changeCurDir("..");
@@ -110,17 +141,17 @@ pub fn handleInput(self: *Self, allocator: Allocator, input: u8, buffer: []u8) !
             const path = try std.process.getCwd(buffer);
             self.cwd_name = std.fs.path.basename(path);
         },
-        'j' => self.cursor = if (self.cursor != total_index)
+        .j, .arrow_down => self.cursor = if (self.cursor != total_index)
             self.cursor + 1
         else
             0,
-        'k' => {
+        .k, .arrow_up => {
             self.cursor = if (self.cursor != 0)
                 self.cursor - 1
             else
                 total_index;
         },
-        'l' => {
+        .l, .arrow_right => {
             if (self.cursor < self.n_dirs) {
                 const name = self.entries.getNameAtEntryIndex(self.cursor);
                 self.cursor = 0;
@@ -133,9 +164,8 @@ pub fn handleInput(self: *Self, allocator: Allocator, input: u8, buffer: []u8) !
                 try self.appendCwdEntries(allocator);
             }
         },
-        'g' => self.cursor = 0,
-        'G' => self.cursor = total_index,
-        else => return,
+        .g => self.cursor = 0,
+        .G => self.cursor = total_index,
     }
 
     const new_len = self.entries.len();
