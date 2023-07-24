@@ -107,7 +107,7 @@ pub fn handleInput(
     const total_index = if (len != 0) len - 1 else 0;
 
     const Key = enum(u8) {
-        init = 0,
+        ignore = 0,
         q = 'q',
         h = 'h',
         j = 'j',
@@ -119,23 +119,23 @@ pub fn handleInput(
         arrow_down = 0x42,
         arrow_right = 0x43,
         arrow_left = 0x44,
-
-        fn enumFromInt(int: u8) @This() {
-            return @as(@This(), @enumFromInt(int));
-        }
     };
 
     const real_input = if (input == 0x1b and (try stdin.readByte() == 0x5b))
-        @as(Key, @enumFromInt(try stdin.readByte()))
+        try std.meta.intToEnum(Key, try stdin.readByte())
     else
-        @as(Key, @enumFromInt(input));
+        std.meta.intToEnum(Key, input) catch .ignore;
 
     switch (real_input) {
-        .init => {},
+        .ignore => {},
         .q => self.running = false,
         .h, .arrow_left => {
             self.clearEntries();
-            self.cursor = try self.appendAboveEntries(allocator);
+            self.cursor = self.appendAboveEntries(allocator) catch |err| if (err == error.NoMatchingDirFound)
+                self.cursor
+            else
+                return err;
+
             try std.process.changeCurDir("..");
 
             const path = try std.process.getCwd(buffer);
