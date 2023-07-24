@@ -11,12 +11,12 @@ ready to run on any linux distribution.
 Clone the repository, and just one command to build:
 
 ```sh
-zig build
+zig build -Doptimize=ReleaseSafe
 ```
 To execute it, run:
 
 ```sh
-zig build run
+zig build -Doptimize=ReleaseSafe run
 ```
 
 Or add `zig-out/bin/` to your `$PATH` environment variable.
