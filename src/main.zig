@@ -30,7 +30,7 @@ pub fn main() !void {
 
     var cwd_buffer: [4096]u8 = undefined;
     const cwd_path = try std.process.getCwd(&cwd_buffer);
-    sea.cwd_name = std.fs.path.basename(cwd_path);
+    sea.cwd = cwd_path;
 
     // Setup cd on quit if available
     var cd_quit: ?[]const u8 = null;
@@ -58,7 +58,14 @@ pub fn main() !void {
         });
         try stdout.print("Terminal size: {} rows\x1B[1E", .{sea.s_win.height});
         try stdout.print("Scroll window: {}\x1B[1E", .{sea.s_win});
-        try stdout.print("Cursor selection index: {}\x1B[2E", .{sea.cursor});
+        try stdout.print("Cursor selection index: {}\x1B[1E", .{sea.cursor});
+
+        try stdout.writeAll("Selection list: ");
+        {
+            for (sea.selection.keys()) |key|
+                try stdout.print("{}, ", .{key});
+            try stdout.writeAll("\x1B[1E");
+        }
 
         try sea.printEntries(stdout);
 
@@ -82,6 +89,6 @@ pub fn main() !void {
 
         const file = try std.fs.createFileAbsolute(lastd_file, .{});
         defer file.close();
-        try file.writer().print("cd {s}", .{try std.process.getCwd(&cwd_buffer)});
+        try file.writer().print("cd {s}", .{sea.cwd});
     }
 }

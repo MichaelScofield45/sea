@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 
 stdin: std.fs.File,
 entries: EntryList,
+selection: std.AutoArrayHashMap(u32, void),
 n_dirs: usize,
 cursor: usize,
 
@@ -14,7 +15,7 @@ s_win: struct {
     end: u32,
 },
 running: bool,
-cwd_name: []const u8,
+cwd: []const u8,
 original_termios: std.os.termios,
 
 const Self = @This();
@@ -33,13 +34,14 @@ pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
         .stdin = stdin,
         .cursor = 0,
         .running = true,
-        .cwd_name = undefined,
+        .cwd = undefined,
         .original_termios = original_termios,
         .s_win = .{
             .height = try getTerminalSize(stdin.handle) - 7,
             .end = 0,
         },
-        .entries = try EntryList.initCapacity(allocator, 1024),
+        .entries = try EntryList.initCapacity(allocator, 2048),
+        .selection = std.AutoArrayHashMap(u32, void).init(allocator),
         .n_dirs = undefined,
     };
 }
@@ -51,6 +53,7 @@ pub fn deinit(self: *Self) void {
     };
 
     self.entries.deinit();
+    self.selection.deinit();
 }
 
 fn getTerminalSize(stdin_handle: std.os.fd_t) !u32 {
@@ -70,21 +73,26 @@ pub fn printEntries(self: Self, writer: anytype) !void {
     const end = self.s_win.end;
 
     for (self.entries.getIndices()[end - height ..][0..height], end - height..) |_, n_entry| {
+        const under_cursor = n_entry == self.cursor;
         const style = blk: {
             if (n_entry < self.n_dirs) {
-                if (n_entry == self.cursor)
-                    break :blk "\x1B[30;44m"
+                break :blk if (under_cursor)
+                    "\x1B[30;44m"
                 else
-                    break :blk "\x1B[1;34;49m";
+                    "\x1B[1;34;49m";
             } else {
-                if (n_entry == self.cursor)
-                    break :blk "\x1B[30;47m"
+                break :blk if (under_cursor)
+                    "\x1B[30;47m"
                 else
-                    break :blk "\x1B[0m";
+                    "\x1B[0m";
             }
         };
 
         try writer.writeAll(style);
+
+        if (self.selection.contains(@intCast(n_entry)))
+            try writer.writeAll("> ");
+
         try writer.print("{s}\x1B[1E", .{self.entries.getNameAtEntryIndex(n_entry)});
     }
 
@@ -115,10 +123,13 @@ pub fn handleInput(
         l = 'l',
         g = 'g',
         G = 'G',
-        arrow_up = 0x41,
-        arrow_down = 0x42,
-        arrow_right = 0x43,
-        arrow_left = 0x44,
+        a = 'a',
+        A = 'A',
+        space = ' ',
+        // arrow_up = 0x41,
+        // arrow_down = 0x42,
+        // arrow_right = 0x43,
+        // arrow_left = 0x44,
     };
 
     const real_input = if (input == 0x1b and (try stdin.readByte() == 0x5b))
@@ -129,7 +140,7 @@ pub fn handleInput(
     switch (real_input) {
         .ignore => {},
         .q => self.running = false,
-        .h, .arrow_left => {
+        .h => {
             self.clearEntries();
             self.cursor = self.appendAboveEntries(allocator) catch |err| if (err == error.NoMatchingDirFound)
                 self.cursor
@@ -139,33 +150,50 @@ pub fn handleInput(
             try std.process.changeCurDir("..");
 
             const path = try std.process.getCwd(buffer);
-            self.cwd_name = std.fs.path.basename(path);
+            self.cwd = path;
+
+            self.selection.clearRetainingCapacity();
         },
-        .j, .arrow_down => self.cursor = if (self.cursor != total_index)
+        .j => self.cursor = if (self.cursor != total_index)
             self.cursor + 1
         else
             0,
-        .k, .arrow_up => {
+        .k => {
             self.cursor = if (self.cursor != 0)
                 self.cursor - 1
             else
                 total_index;
         },
-        .l, .arrow_right => {
+        .l => {
             if (self.cursor < self.n_dirs) {
                 const name = self.entries.getNameAtEntryIndex(self.cursor);
                 self.cursor = 0;
 
                 try std.process.changeCurDir(name);
                 const path = try std.process.getCwd(buffer);
-                self.cwd_name = std.fs.path.basename(path);
+                self.cwd = path;
 
                 self.clearEntries();
                 try self.appendCwdEntries(allocator);
+
+                self.selection.clearRetainingCapacity();
             }
         },
         .g => self.cursor = 0,
         .G => self.cursor = total_index,
+        .space => {
+            const entry = try self.selection.getOrPut(@intCast(self.cursor));
+            if (entry.found_existing)
+                _ = self.selection.orderedRemove(@intCast(self.cursor));
+        },
+        .a => for (0..self.entries.len()) |i| {
+            try self.selection.put(@intCast(i), {});
+        },
+        .A => for (0..self.entries.len()) |i| {
+            const entry = try self.selection.getOrPut(@intCast(i));
+            if (entry.found_existing)
+                _ = self.selection.orderedRemove(@intCast(i));
+        },
     }
 
     const new_len = self.entries.len();
@@ -233,7 +261,9 @@ pub fn appendAboveEntries(self: *Self, allocator: Allocator) !usize {
     while (try it.next()) |entry| {
         if (entry.kind == .directory and !std.mem.startsWith(u8, entry.name, ".")) {
             try self.entries.append(entry.name);
-            if (std.mem.eql(u8, self.cwd_name, entry.name)) match = count;
+            if (std.mem.eql(u8, std.fs.path.basename(self.cwd), entry.name))
+                match = count;
+
             count += 1;
         } else {
             if (!std.mem.startsWith(u8, entry.name, "."))
