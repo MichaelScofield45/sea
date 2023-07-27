@@ -65,15 +65,15 @@ Or add `zig-out/bin/` to your `$PATH` environment variable.
 # Planned Features
 
 The following are ordered by priority:
-- [x] Support `cd` on quit
-- [x] Select with <kbd>Space</kbd>
+1. [x] Support `cd` on quit
+1. [x] Select with <kbd>Space</kbd>
     - [x] Deselect
     - [ ] Save selections between directory changes
-- [x] Select all with <kbd>a</kbd>
-- [x] Invert selection with <kbd>A</kbd>
-- [ ] Delete selections
-- [ ] Create selections
-- [ ] Move selections
-- [ ] Properly handle arrow keys (they were removed because of overlap with
-  other keys when reading byte by byte)
-- [ ] macOS support
+1. [x] Select all with <kbd>a</kbd>
+1. [x] Invert selection with <kbd>A</kbd>
+1. [ ] Delete selections
+1. [ ] Move selections
+1. [ ] Create files and directories
+1. [ ] Properly handle arrow keys (they were removed because of overlap with
+   other keys when reading byte by byte)
+1. [ ] macOS support
