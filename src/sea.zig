@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 
 stdin: std.fs.File,
 entries: EntryList,
-selection: std.AutoArrayHashMap(u32, void),
+selection: std.ArrayList(bool),
 n_dirs: usize,
 cursor: usize,
 
@@ -41,7 +41,7 @@ pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
             .end = 0,
         },
         .entries = try EntryList.initCapacity(allocator, 2048),
-        .selection = std.AutoArrayHashMap(u32, void).init(allocator),
+        .selection = try std.ArrayList(bool).initCapacity(allocator, 1024),
         .n_dirs = undefined,
     };
 }
@@ -90,7 +90,7 @@ pub fn printEntries(self: Self, writer: anytype) !void {
 
         try writer.writeAll(style);
 
-        if (self.selection.contains(@intCast(n_entry)))
+        if (self.selection.items[n_entry])
             try writer.writeAll("> ");
 
         try writer.print("{s}\x1B[1E", .{self.entries.getNameAtEntryIndex(n_entry)});
@@ -152,7 +152,7 @@ pub fn handleInput(
             const path = try std.process.getCwd(buffer);
             self.cwd = path;
 
-            self.selection.clearRetainingCapacity();
+            try self.resetSelectionAndResize(self.entries.len());
         },
         .j => self.cursor = if (self.cursor != total_index)
             self.cursor + 1
@@ -176,23 +176,19 @@ pub fn handleInput(
                 self.clearEntries();
                 try self.appendCwdEntries(allocator);
 
-                self.selection.clearRetainingCapacity();
+                try self.resetSelectionAndResize(self.entries.len());
             }
         },
         .g => self.cursor = 0,
         .G => self.cursor = total_index,
         .space => {
-            const entry = try self.selection.getOrPut(@intCast(self.cursor));
-            if (entry.found_existing)
-                _ = self.selection.orderedRemove(@intCast(self.cursor));
+            self.selection.items[self.cursor] = !self.selection.items[self.cursor];
         },
-        .a => for (0..self.entries.len()) |i| {
-            try self.selection.put(@intCast(i), {});
+        .a => for (self.selection.items) |*item| {
+            item.* = true;
         },
-        .A => for (0..self.entries.len()) |i| {
-            const entry = try self.selection.getOrPut(@intCast(i));
-            if (entry.found_existing)
-                _ = self.selection.orderedRemove(@intCast(i));
+        .A => for (self.selection.items) |*item| {
+            item.* = !item.*;
         },
     }
 
@@ -205,6 +201,12 @@ pub fn handleInput(
     } else if (self.cursor < self.s_win.end - relative_height) {
         self.s_win.end = @as(u32, @intCast(self.cursor)) + self.s_win.height;
     }
+}
+
+pub fn resetSelectionAndResize(self: *Self, new_size: usize) !void {
+    try self.selection.resize(new_size);
+    for (self.selection.items) |*item|
+        item.* = false;
 }
 
 pub fn appendCwdEntries(self: *Self, allocator: Allocator) !void {

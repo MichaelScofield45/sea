@@ -24,6 +24,7 @@ pub fn main() !void {
     defer sea.deinit();
 
     try sea.appendCwdEntries(allocator);
+    try sea.resetSelectionAndResize(sea.entries.len());
 
     var input_char: u8 = 0;
     try stdout.writeAll("\x1B[?25l");
@@ -59,13 +60,6 @@ pub fn main() !void {
         try stdout.print("Terminal size: {} rows\x1B[1E", .{sea.s_win.height});
         try stdout.print("Scroll window: {}\x1B[1E", .{sea.s_win});
         try stdout.print("Cursor selection index: {}\x1B[1E", .{sea.cursor});
-
-        try stdout.writeAll("Selection list: ");
-        {
-            for (sea.selection.keys()) |key|
-                try stdout.print("{}, ", .{key});
-            try stdout.writeAll("\x1B[1E");
-        }
 
         try sea.printEntries(stdout);
 
