@@ -3,18 +3,17 @@ const linux = std.os.linux;
 const EntryList = @import("entry_list.zig");
 const Allocator = std.mem.Allocator;
 
-stdin: std.fs.File,
+cursor: usize,
 entries: EntryList,
 selection: std.ArrayList(bool),
+n_selected: usize,
 n_dirs: usize,
-cursor: usize,
 
 /// Scroll window for smooth scrolling and rendering
 s_win: struct {
     height: u32,
     end: u32,
 },
-running: bool,
 cwd: []const u8,
 original_termios: std.os.termios,
 
@@ -31,9 +30,7 @@ pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
     try std.os.tcsetattr(stdin.handle, .FLUSH, new);
 
     return .{
-        .stdin = stdin,
         .cursor = 0,
-        .running = true,
         .cwd = undefined,
         .original_termios = original_termios,
         .s_win = .{
@@ -42,12 +39,13 @@ pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
         },
         .entries = try EntryList.initCapacity(allocator, 2048),
         .selection = try std.ArrayList(bool).initCapacity(allocator, 1024),
+        .n_selected = 0,
         .n_dirs = undefined,
     };
 }
 
-pub fn deinit(self: *Self) void {
-    std.os.tcsetattr(self.stdin.handle, .FLUSH, self.original_termios) catch |err| {
+pub fn deinit(self: *Self, stdin: std.fs.File) void {
+    std.os.tcsetattr(stdin.handle, .FLUSH, self.original_termios) catch |err| {
         std.log.err("unexpected error at shutdown: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -65,38 +63,47 @@ fn getTerminalSize(stdin_handle: std.os.fd_t) !u32 {
     return @as(u32, size.ws_row);
 }
 
+pub fn printStatus(self: Self, writer: anytype, past_selected: usize) !void {
+    try writer.print("\x1B[34m{s}\x1B[0m\x1B[1E", .{self.cwd});
+
+    const entries_len = self.entries.len();
+    try writer.print("{} / {}", .{ self.cursor + 1, entries_len });
+
+    const total_selected = self.n_selected + past_selected;
+    if (total_selected != 0)
+        try writer.print("  \x1B[1;30;42m {} ", .{total_selected});
+
+    try writer.writeAll("\x1B[2E");
+}
+
 pub fn printEntries(self: Self, writer: anytype) !void {
     const height = if (self.s_win.height > self.entries.len())
         self.entries.len()
     else
         self.s_win.height;
     const end = self.s_win.end;
+    const start = end - height;
 
-    for (self.entries.getIndices()[end - height ..][0..height], end - height..) |_, n_entry| {
+    for (self.entries.getIndices()[start..][0..height], start..) |_, n_entry| {
         const under_cursor = n_entry == self.cursor;
-        const style = blk: {
-            if (n_entry < self.n_dirs) {
-                break :blk if (under_cursor)
-                    "\x1B[30;44m"
-                else
-                    "\x1B[1;34;49m";
-            } else {
-                break :blk if (under_cursor)
-                    "\x1B[30;47m"
-                else
-                    "\x1B[0m";
-            }
-        };
-
-        try writer.writeAll(style);
 
         if (self.selection.items[n_entry])
-            try writer.writeAll("> ");
+            try writer.writeAll("\x1B[30;42m>\x1B[0m")
+        else
+            try writer.writeAll("\x1B[0m ");
 
-        try writer.print("{s}\x1B[1E", .{self.entries.getNameAtEntryIndex(n_entry)});
+        if (n_entry < self.n_dirs) {
+            try writer.print("{s}{s}\x1B[0m/\x1B[1E", .{
+                if (under_cursor) "\x1B[1;30;44m" else "\x1B[1;34;49m",
+                self.entries.getNameAtEntryIndex(n_entry),
+            });
+        } else {
+            try writer.print("{s}{s}\x1B[1E", .{
+                if (under_cursor) "\x1B[30;47m" else "",
+                self.entries.getNameAtEntryIndex(n_entry),
+            });
+        }
     }
-
-    try writer.writeAll("\x1B[0m");
 }
 
 pub fn clearEntries(self: *Self) void {
@@ -104,43 +111,49 @@ pub fn clearEntries(self: *Self) void {
     self.entries.indices.clearRetainingCapacity();
 }
 
+const Event = union(enum) {
+    move,
+    select,
+    quit,
+    ch_dir: ?struct {
+        cwd: []const u8,
+        true_idxs: []const u32,
+        names: []const u8,
+    },
+};
+
+pub const PastDir = struct {
+    idxs: []const u32,
+    names: []const u8,
+};
+
 pub fn handleInput(
     self: *Self,
     allocator: Allocator,
-    stdin: anytype,
+    hash_map: *std.StringHashMap(PastDir),
     input: u8,
     buffer: []u8,
-) !void {
+) !Event {
     const len = self.entries.len();
     const total_index = if (len != 0) len - 1 else 0;
 
-    const Key = enum(u8) {
-        ignore = 0,
-        q = 'q',
-        h = 'h',
-        j = 'j',
-        k = 'k',
-        l = 'l',
-        g = 'g',
-        G = 'G',
-        a = 'a',
-        A = 'A',
-        space = ' ',
-        // arrow_up = 0x41,
-        // arrow_down = 0x42,
-        // arrow_right = 0x43,
-        // arrow_left = 0x44,
-    };
+    var event: Event = undefined;
+    switch (input) {
+        else => event = .move,
+        'q' => event = .quit,
+        'h' => {
+            const curr_selection = try self.findTruesAndNames(allocator);
+            event = .{
+                .ch_dir = if (self.n_selected == 0)
+                    null
+                else
+                    .{
+                        .cwd = try allocator.dupe(u8, self.cwd),
+                        .true_idxs = curr_selection.true_idxs,
+                        .names = curr_selection.names,
+                    },
+            };
 
-    const real_input = if (input == 0x1b and (try stdin.readByte() == 0x5b))
-        try std.meta.intToEnum(Key, try stdin.readByte())
-    else
-        std.meta.intToEnum(Key, input) catch .ignore;
-
-    switch (real_input) {
-        .ignore => {},
-        .q => self.running = false,
-        .h => {
             self.clearEntries();
             self.cursor = self.appendAboveEntries(allocator) catch |err| if (err == error.NoMatchingDirFound)
                 self.cursor
@@ -153,21 +166,50 @@ pub fn handleInput(
             self.cwd = path;
 
             try self.resetSelectionAndResize(self.entries.len());
+            if (hash_map.getEntry(self.cwd)) |entry| {
+                self.n_selected = entry.value_ptr.idxs.len;
+
+                for (entry.value_ptr.idxs) |idx|
+                    self.selection.items[idx] = true;
+
+                allocator.free(entry.value_ptr.idxs);
+                allocator.free(entry.value_ptr.names);
+                allocator.free(entry.key_ptr.*);
+                _ = hash_map.removeByPtr(entry.key_ptr);
+            } else {
+                self.n_selected = 0;
+            }
         },
-        .j => self.cursor = if (self.cursor != total_index)
-            self.cursor + 1
-        else
-            0,
-        .k => {
+        'j' => {
+            self.cursor = if (self.cursor != total_index)
+                self.cursor + 1
+            else
+                0;
+            event = .move;
+        },
+        'k' => {
             self.cursor = if (self.cursor != 0)
                 self.cursor - 1
             else
                 total_index;
+            event = .move;
         },
-        .l => {
+        'l' => {
             if (self.cursor < self.n_dirs) {
                 const name = self.entries.getNameAtEntryIndex(self.cursor);
                 self.cursor = 0;
+
+                const curr_selection = try self.findTruesAndNames(allocator);
+                event = .{
+                    .ch_dir = if (self.n_selected == 0)
+                        null
+                    else
+                        .{
+                            .cwd = try allocator.dupe(u8, self.cwd),
+                            .true_idxs = curr_selection.true_idxs,
+                            .names = curr_selection.names,
+                        },
+                };
 
                 try std.process.changeCurDir(name);
                 const path = try std.process.getCwd(buffer);
@@ -177,30 +219,90 @@ pub fn handleInput(
                 try self.appendCwdEntries(allocator);
 
                 try self.resetSelectionAndResize(self.entries.len());
+                if (hash_map.getEntry(self.cwd)) |entry| {
+                    self.n_selected = entry.value_ptr.idxs.len;
+
+                    for (entry.value_ptr.idxs) |idx|
+                        self.selection.items[idx] = true;
+
+                    allocator.free(entry.value_ptr.idxs);
+                    allocator.free(entry.value_ptr.names);
+                    allocator.free(entry.key_ptr.*);
+                    _ = hash_map.removeByPtr(entry.key_ptr);
+                } else {
+                    self.n_selected = 0;
+                }
             }
         },
-        .g => self.cursor = 0,
-        .G => self.cursor = total_index,
-        .space => {
+        'g' => {
+            self.cursor = 0;
+            event = .move;
+        },
+        'G' => {
+            self.cursor = total_index;
+            event = .move;
+        },
+        ' ' => {
             self.selection.items[self.cursor] = !self.selection.items[self.cursor];
+            if (self.selection.items[self.cursor])
+                self.n_selected += 1
+            else
+                self.n_selected -= 1;
+            self.cursor = std.math.clamp(self.cursor + 1, 0, self.entries.len() - 1);
+
+            event = .select;
         },
-        .a => for (self.selection.items) |*item| {
-            item.* = true;
+        'a' => {
+            for (self.selection.items) |*item|
+                item.* = true;
+
+            self.n_selected = self.entries.len();
+
+            event = .select;
         },
-        .A => for (self.selection.items) |*item| {
-            item.* = !item.*;
+        'A' => {
+            for (self.selection.items) |*item|
+                item.* = !item.*;
+
+            self.n_selected = self.entries.len() - self.n_selected;
+
+            event = .select;
         },
     }
 
     const new_len = self.entries.len();
     const relative_height = if (self.s_win.height > new_len) new_len else self.s_win.height;
 
-    if (new_len == 0) return;
+    if (new_len == 0) return event;
     if (self.cursor >= self.s_win.end) {
         self.s_win.end = @intCast(self.cursor + 1);
     } else if (self.cursor < self.s_win.end - relative_height) {
         self.s_win.end = @as(u32, @intCast(self.cursor)) + self.s_win.height;
     }
+
+    return event;
+}
+
+pub fn findTruesAndNames(self: Self, allocator: Allocator) !struct {
+    true_idxs: []const u32,
+    names: []const u8,
+} {
+    var names = std.ArrayList(u8).init(allocator);
+    var idxs = std.ArrayList(u32).init(allocator);
+    for (self.selection.items, 0..) |single_bool, idx| {
+        if (single_bool) {
+            try idxs.append(@intCast(idx));
+            try names.appendSlice(self.entries.getNameAtEntryIndex(idx));
+            try names.append(0);
+        }
+    }
+
+    _ = names.popOrNull(); // Remove last null character
+
+    return .{
+        .true_idxs = try idxs.toOwnedSlice(),
+        .names = try names.toOwnedSlice(),
+    };
 }
 
 pub fn resetSelectionAndResize(self: *Self, new_size: usize) !void {
