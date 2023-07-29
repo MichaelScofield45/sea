@@ -155,10 +155,10 @@ pub fn handleInput(
             };
 
             self.clearEntries();
-            self.cursor = self.appendAboveEntries(allocator) catch |err| if (err == error.NoMatchingDirFound)
-                self.cursor
-            else
-                return err;
+            self.appendAboveEntries(allocator) catch |err| switch (err) {
+                error.NoMatchingDirFound => {},
+                else => return err,
+            };
 
             try std.process.changeCurDir("..");
 
@@ -350,7 +350,7 @@ pub fn appendCwdEntries(self: *Self, allocator: Allocator) !void {
 
 /// Appends all entries of the above directory, returning which entry matches the
 /// current working directory
-pub fn appendAboveEntries(self: *Self, allocator: Allocator) !usize {
+pub fn appendAboveEntries(self: *Self, allocator: Allocator) !void {
     var iterable_dir = try std.fs.cwd().openIterableDir("..", .{});
     defer iterable_dir.close();
 
@@ -395,7 +395,7 @@ pub fn appendAboveEntries(self: *Self, allocator: Allocator) !usize {
     };
 
     if (match) |index|
-        return index
+        self.cursor = index
     else
         return error.NoMatchingDirFound;
 }

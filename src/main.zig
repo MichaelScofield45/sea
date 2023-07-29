@@ -51,8 +51,7 @@ pub fn main() !void {
     try stdout.writeAll("\x1B[?25l");
 
     var cwd_buffer: [4096]u8 = undefined;
-    const cwd_path = try std.process.getCwd(&cwd_buffer);
-    sea.cwd = cwd_path;
+    sea.cwd = try std.process.getCwd(&cwd_buffer);
 
     // Setup cd on quit if available
     var cd_quit: ?[]const u8 = null;
