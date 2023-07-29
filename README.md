@@ -23,7 +23,7 @@ zig version
 ```
 
 You can download the latest official compiler binaries from the Zig
-[downloads](https://ziglang.org/downloads/) page.
+[downloads](https://ziglang.org/download/) page.
 
 ## Once you have the compiler
 
@@ -47,10 +47,10 @@ Or add `zig-out/bin/` to your `$PATH` environment variable.
 | Key | Action |
 |-----|--------|
 | <kbd>q</kbd> | quit |
-| <kbd>h</kbd> | go left (go to the above directory) |
-| <kbd>j</kbd> | go down one entry in current directory |
-| <kbd>k</kbd> | go up one entry in current directory |
-| <kbd>l</kbd> | go right (enter directory selected) |
+| <kbd>h</kbd> or <kbd>&larr;</kbd> | go left (go to the above directory) |
+| <kbd>j</kbd> or <kbd>&darr;</kbd> | go down one entry in current directory |
+| <kbd>k</kbd> or <kbd>&uarr;</kbd> | go up one entry in current directory |
+| <kbd>l</kbd> or <kbd>&rarr;</kbd> | go right (enter directory selected) |
 | <kbd>g</kbd> | go to top |
 | <kbd>G</kbd> | go to bottom |
 
@@ -65,15 +65,15 @@ Or add `zig-out/bin/` to your `$PATH` environment variable.
 # Planned Features
 
 The following are ordered by priority:
-1. [x] Support `cd` on quit
-1. [x] Select with <kbd>Space</kbd>
+- [x] Support `cd` on quit
+- [x] Select with <kbd>Space</kbd>
     - [x] Deselect
-    - [ ] Save selections between directory changes
-1. [x] Select all with <kbd>a</kbd>
-1. [x] Invert selection with <kbd>A</kbd>
-1. [ ] Delete selections
-1. [ ] Move selections
-1. [ ] Create files and directories
-1. [ ] Properly handle arrow keys (they were removed because of overlap with
-   other keys when reading byte by byte)
-1. [ ] macOS support
+    - [x] Save selections between directory changes
+- [x] Select all with <kbd>a</kbd>
+- [x] Invert selection with <kbd>A</kbd>
+- [x] Properly handle arrow keys (they were removed because of overlap with
+      other keys when reading byte by byte)
+- [ ] Delete selections
+- [ ] Move selections
+- [ ] Create files and directories
+- [ ] macOS support

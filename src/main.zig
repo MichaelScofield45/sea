@@ -1,7 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
+
 const Sea = @import("sea.zig");
+const Event = Sea.Event;
 const PastDir = Sea.PastDir;
 
 pub fn main() !void {
@@ -47,7 +49,6 @@ pub fn main() !void {
     try sea.appendCwdEntries(allocator);
     try sea.resetSelectionAndResize(sea.entries.len());
 
-    var input_char: u8 = 0;
     try stdout.writeAll("\x1B[?25l");
 
     var cwd_buffer: [4096]u8 = undefined;
@@ -72,21 +73,14 @@ pub fn main() !void {
     }
 
     // Main loop
-    while (true) : (input_char = try stdin.readByte()) {
+    var running = true;
+    var input: [3]u8 = .{ 0, 0, 0 };
+    while (running) : (_ = try stdin.read(&input)) {
         var timer = try std.time.Timer.start();
 
-        const event = try sea.handleInput(allocator, &past_dirs, input_char, &cwd_buffer);
-        switch (event) {
-            .quit => break, // Quit application
-            .move, .select => {},
-            .ch_dir => |selection| {
-                if (selection) |value|
-                    try past_dirs.put(value.cwd, .{
-                        .idxs = value.true_idxs,
-                        .names = value.names,
-                    });
-            },
-        }
+        const event = Event.fromInput(input);
+        try sea.handleEvent(allocator, event, &running, &past_dirs, &cwd_buffer);
+        if (!running) break;
 
         const end = timer.read();
 

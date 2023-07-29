@@ -19,6 +19,53 @@ original_termios: std.os.termios,
 
 const Self = @This();
 
+pub const Event = enum {
+    quit,
+    left,
+    down,
+    up,
+    right,
+    top,
+    bottom,
+    select_entry,
+    select_all,
+    select_invert,
+    delete,
+    move,
+    paste,
+
+    pub fn fromInput(input: [3]u8) ?Event {
+        if (input[0] == 0x1b)
+            return switch (std.mem.readIntSliceBig(u16, input[1..])) {
+                0x5b41 => .up,
+                0x5b42 => .down,
+                0x5b44 => .left,
+                0x5b43 => .right,
+                else => null,
+            };
+
+        return switch (input[0]) {
+            'q' => .quit,
+            'h' => .left,
+            'j' => .down,
+            'k' => .up,
+            'l' => .right,
+            'g' => .top,
+            'G' => .bottom,
+
+            ' ' => .select_entry,
+            'a' => .select_all,
+            'A' => .select_invert,
+
+            'd' => .delete,
+            'v' => .move,
+            'p' => .paste,
+
+            else => null,
+        };
+    }
+};
+
 pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
     var original_termios = try std.os.tcgetattr(stdin.handle);
 
@@ -111,48 +158,53 @@ pub fn clearEntries(self: *Self) void {
     self.entries.indices.clearRetainingCapacity();
 }
 
-const Event = union(enum) {
-    move,
-    select,
-    quit,
-    ch_dir: ?struct {
-        cwd: []const u8,
-        true_idxs: []const u32,
-        names: []const u8,
-    },
-};
+// const Event = union(enum) {
+//     ignore,
+//     move,
+//     delete: ?[]const bool,
+//     paste,
+//     select,
+//     quit,
+//     ch_dir: ?struct {
+//         cwd: []const u8,
+//         true_idxs: []const u32,
+//         names: []const u8,
+//     },
+// };
 
 pub const PastDir = struct {
     idxs: []const u32,
     names: []const u8,
 };
 
-pub fn handleInput(
+pub fn handleEvent(
     self: *Self,
     allocator: Allocator,
+    event: ?Event,
+    running: *bool,
     hash_map: *std.StringHashMap(PastDir),
-    input: u8,
     buffer: []u8,
-) !Event {
+) !void {
     const len = self.entries.len();
     const total_index = if (len != 0) len - 1 else 0;
 
-    var event: Event = undefined;
-    switch (input) {
-        else => event = .move,
-        'q' => event = .quit,
-        'h' => {
+    if (event == null) return;
+    switch (event.?) {
+        .quit => running.* = false,
+
+        // Movement
+        .left => {
             const curr_selection = try self.findTruesAndNames(allocator);
-            event = .{
-                .ch_dir = if (self.n_selected == 0)
-                    null
-                else
+
+            if (self.n_selected != 0) {
+                try hash_map.put(
+                    try allocator.dupe(u8, self.cwd),
                     .{
-                        .cwd = try allocator.dupe(u8, self.cwd),
-                        .true_idxs = curr_selection.true_idxs,
+                        .idxs = curr_selection.true_idxs,
                         .names = curr_selection.names,
                     },
-            };
+                );
+            }
 
             self.clearEntries();
             self.appendAboveEntries(allocator) catch |err| switch (err) {
@@ -180,107 +232,111 @@ pub fn handleInput(
                 self.n_selected = 0;
             }
         },
-        'j' => {
+
+        .down => {
             self.cursor = if (self.cursor != total_index)
                 self.cursor + 1
             else
                 0;
-            event = .move;
         },
-        'k' => {
+
+        .up => {
             self.cursor = if (self.cursor != 0)
                 self.cursor - 1
             else
                 total_index;
-            event = .move;
         },
-        'l' => {
-            if (self.cursor < self.n_dirs) {
-                const name = self.entries.getNameAtEntryIndex(self.cursor);
-                self.cursor = 0;
 
-                const curr_selection = try self.findTruesAndNames(allocator);
-                event = .{
-                    .ch_dir = if (self.n_selected == 0)
-                        null
-                    else
-                        .{
-                            .cwd = try allocator.dupe(u8, self.cwd),
-                            .true_idxs = curr_selection.true_idxs,
-                            .names = curr_selection.names,
-                        },
-                };
+        .right => {
+            if (self.cursor > self.n_dirs) return;
 
-                try std.process.changeCurDir(name);
-                const path = try std.process.getCwd(buffer);
-                self.cwd = path;
+            const name = self.entries.getNameAtEntryIndex(self.cursor);
+            self.cursor = 0;
 
-                self.clearEntries();
-                try self.appendCwdEntries(allocator);
+            const curr_selection = try self.findTruesAndNames(allocator);
 
-                try self.resetSelectionAndResize(self.entries.len());
-                if (hash_map.getEntry(self.cwd)) |entry| {
-                    self.n_selected = entry.value_ptr.idxs.len;
+            if (self.n_selected != 0) {
+                try hash_map.put(
+                    try allocator.dupe(u8, self.cwd),
+                    .{
+                        .idxs = curr_selection.true_idxs,
+                        .names = curr_selection.names,
+                    },
+                );
+            }
 
-                    for (entry.value_ptr.idxs) |idx|
-                        self.selection.items[idx] = true;
+            try std.process.changeCurDir(name);
+            const path = try std.process.getCwd(buffer);
+            self.cwd = path;
 
-                    allocator.free(entry.value_ptr.idxs);
-                    allocator.free(entry.value_ptr.names);
-                    allocator.free(entry.key_ptr.*);
-                    _ = hash_map.removeByPtr(entry.key_ptr);
-                } else {
-                    self.n_selected = 0;
-                }
+            self.clearEntries();
+            try self.appendCwdEntries(allocator);
+
+            try self.resetSelectionAndResize(self.entries.len());
+
+            if (hash_map.getEntry(self.cwd)) |entry| {
+                self.n_selected = entry.value_ptr.idxs.len;
+
+                for (entry.value_ptr.idxs) |idx|
+                    self.selection.items[idx] = true;
+
+                allocator.free(entry.value_ptr.idxs);
+                allocator.free(entry.value_ptr.names);
+                allocator.free(entry.key_ptr.*);
+                _ = hash_map.removeByPtr(entry.key_ptr);
+            } else {
+                self.n_selected = 0;
             }
         },
-        'g' => {
+
+        .top => {
             self.cursor = 0;
-            event = .move;
         },
-        'G' => {
+
+        .bottom => {
             self.cursor = total_index;
-            event = .move;
         },
-        ' ' => {
+
+        // Selections
+        .select_entry => {
             self.selection.items[self.cursor] = !self.selection.items[self.cursor];
             if (self.selection.items[self.cursor])
                 self.n_selected += 1
             else
                 self.n_selected -= 1;
             self.cursor = std.math.clamp(self.cursor + 1, 0, self.entries.len() - 1);
-
-            event = .select;
         },
-        'a' => {
+
+        .select_all => {
             for (self.selection.items) |*item|
                 item.* = true;
 
             self.n_selected = self.entries.len();
-
-            event = .select;
         },
-        'A' => {
+
+        .select_invert => {
             for (self.selection.items) |*item|
                 item.* = !item.*;
 
             self.n_selected = self.entries.len() - self.n_selected;
-
-            event = .select;
         },
+
+        // Actions
+        .delete => {},
+        .move => {},
+        .paste => {},
     }
 
     const new_len = self.entries.len();
     const relative_height = if (self.s_win.height > new_len) new_len else self.s_win.height;
 
-    if (new_len == 0) return event;
+    if (new_len == 0) return;
+
     if (self.cursor >= self.s_win.end) {
         self.s_win.end = @intCast(self.cursor + 1);
     } else if (self.cursor < self.s_win.end - relative_height) {
         self.s_win.end = @as(u32, @intCast(self.cursor)) + self.s_win.height;
     }
-
-    return event;
 }
 
 pub fn findTruesAndNames(self: Self, allocator: Allocator) !struct {
