@@ -35,6 +35,7 @@ pub const Event = enum {
     paste,
 
     pub fn fromInput(input: [3]u8) ?Event {
+        // 0x1b is the escape character in terminals
         if (input[0] == 0x1b)
             return switch (std.mem.readIntSliceBig(u16, input[1..])) {
                 0x5b41 => .up,
@@ -81,7 +82,7 @@ pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
         .cwd = undefined,
         .original_termios = original_termios,
         .s_win = .{
-            .height = try getTerminalSize(stdin.handle) - 8,
+            .height = try getTerminalHeight(stdin.handle) - 8,
             .end = 0,
         },
         .entries = try EntryList.initCapacity(allocator, 2048),
@@ -101,7 +102,7 @@ pub fn deinit(self: *Self, stdin: std.fs.File) void {
     self.selection.deinit();
 }
 
-fn getTerminalSize(stdin_handle: std.os.fd_t) !u32 {
+fn getTerminalHeight(stdin_handle: std.os.fd_t) !u32 {
     var size: linux.winsize = undefined;
     // TODO: Handle error with errno
     if (linux.ioctl(stdin_handle, linux.T.IOCGWINSZ, @intFromPtr(&size)) != 0)
@@ -132,24 +133,20 @@ pub fn printEntries(self: Self, writer: anytype) !void {
     const start = end - height;
 
     for (self.entries.getIndices()[start..][0..height], start..) |_, n_entry| {
-        const under_cursor = n_entry == self.cursor;
-
         if (self.selection.items[n_entry])
             try writer.writeAll("\x1B[30;42m>\x1B[0m")
         else
             try writer.writeAll("\x1B[0m ");
 
-        if (n_entry < self.n_dirs) {
-            try writer.print("{s}{s}\x1B[0m/\x1B[1E", .{
-                if (under_cursor) "\x1B[1;30;44m" else "\x1B[1;34;49m",
-                self.entries.getNameAtEntryIndex(n_entry),
-            });
-        } else {
-            try writer.print("{s}{s}\x1B[1E", .{
-                if (under_cursor) "\x1B[30;47m" else "",
-                self.entries.getNameAtEntryIndex(n_entry),
-            });
-        }
+        if (n_entry < self.n_dirs)
+            try writer.writeAll("\x1B[1;34;49m");
+
+        if (n_entry == self.cursor)
+            try writer.writeAll("\x1B[7m");
+
+        try writer.writeAll(self.entries.getNameAtEntryIndex(n_entry));
+
+        try writer.writeAll("\x1B[0m\x1B[1E");
     }
 }
 
@@ -252,7 +249,7 @@ pub fn handleEvent(
             try std.process.changeCurDir(name);
             // TODO: This is a syscall, this can be fixed to be handled only by
             // application logic, just append whatever 'name' is to the path using
-            // FixedSizedStream
+            // FixedBufferStream
             const path = try std.process.getCwd(buffer);
             self.cwd = path;
 
