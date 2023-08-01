@@ -46,8 +46,8 @@ pub fn main() !void {
     var sea = try Sea.init(allocator, stdin_file);
     defer sea.deinit(stdin_file);
 
-    try sea.appendCwdEntries(allocator);
-    try sea.resetSelectionAndResize(sea.entries.len());
+    try sea.indexFilesCwd(allocator);
+    try sea.resetSelectionAndResize();
 
     try stdout.writeAll("\x1B[?25l");
 
@@ -61,7 +61,7 @@ pub fn main() !void {
     if (std.process.hasEnvVarConstant("SEA_TMPFILE"))
         cd_quit = try std.process.getEnvVarOwned(allocator, "SEA_TMPFILE");
 
-    var past_dirs = std.StringHashMap(PastDir).init(allocator);
+    var past_dirs = std.StringArrayHashMap(PastDir).init(allocator);
     defer {
         var it = past_dirs.iterator();
         while (it.next()) |entry| {
@@ -101,9 +101,8 @@ pub fn main() !void {
         }
 
         try sea.printStatus(stdout, blk: {
-            var it = past_dirs.valueIterator();
             var total: usize = 0;
-            while (it.next()) |value|
+            for (past_dirs.values()) |value|
                 total += value.idxs.len;
 
             break :blk total;

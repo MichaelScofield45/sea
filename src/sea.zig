@@ -3,7 +3,7 @@ const linux = std.os.linux;
 const EntryList = @import("entry_list.zig");
 const Allocator = std.mem.Allocator;
 
-cursor: usize,
+cursor: i32,
 entries: EntryList,
 selection: std.ArrayList(bool),
 n_selected: usize,
@@ -81,7 +81,7 @@ pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
         .cwd = undefined,
         .original_termios = original_termios,
         .s_win = .{
-            .height = try getTerminalSize(stdin.handle) - 7,
+            .height = try getTerminalSize(stdin.handle) - 8,
             .end = 0,
         },
         .entries = try EntryList.initCapacity(allocator, 2048),
@@ -158,36 +158,28 @@ pub fn clearEntries(self: *Self) void {
     self.entries.indices.clearRetainingCapacity();
 }
 
-// const Event = union(enum) {
-//     ignore,
-//     move,
-//     delete: ?[]const bool,
-//     paste,
-//     select,
-//     quit,
-//     ch_dir: ?struct {
-//         cwd: []const u8,
-//         true_idxs: []const u32,
-//         names: []const u8,
-//     },
-// };
-
 pub const PastDir = struct {
     idxs: []const u32,
     names: []const u8,
 };
+
+fn moveCursor(self: *Self, new_pos: i32, clamp: bool) void {
+    if (new_pos < 0)
+        self.cursor = @intCast(self.entries.len() - 1)
+    else if (new_pos > self.entries.len() - 1)
+        self.cursor = if (clamp) @intCast(self.entries.len() - 1) else 0
+    else
+        self.cursor = new_pos;
+}
 
 pub fn handleEvent(
     self: *Self,
     allocator: Allocator,
     event: ?Event,
     running: *bool,
-    hash_map: *std.StringHashMap(PastDir),
+    hash_map: *std.StringArrayHashMap(PastDir),
     buffer: []u8,
 ) !void {
-    const len = self.entries.len();
-    const total_index = if (len != 0) len - 1 else 0;
-
     if (event == null) return;
     switch (event.?) {
         .quit => running.* = false,
@@ -217,7 +209,8 @@ pub fn handleEvent(
             const path = try std.process.getCwd(buffer);
             self.cwd = path;
 
-            try self.resetSelectionAndResize(self.entries.len());
+            try self.resetSelectionAndResize();
+
             if (hash_map.getEntry(self.cwd)) |entry| {
                 self.n_selected = entry.value_ptr.idxs.len;
 
@@ -227,30 +220,20 @@ pub fn handleEvent(
                 allocator.free(entry.value_ptr.idxs);
                 allocator.free(entry.value_ptr.names);
                 allocator.free(entry.key_ptr.*);
-                _ = hash_map.removeByPtr(entry.key_ptr);
+                if (hash_map.swapRemove(self.cwd)) unreachable;
             } else {
                 self.n_selected = 0;
             }
         },
 
-        .down => {
-            self.cursor = if (self.cursor != total_index)
-                self.cursor + 1
-            else
-                0;
-        },
+        .down => self.moveCursor(self.cursor + 1, false),
 
-        .up => {
-            self.cursor = if (self.cursor != 0)
-                self.cursor - 1
-            else
-                total_index;
-        },
+        .up => self.moveCursor(self.cursor - 1, false),
 
         .right => {
             if (self.cursor > self.n_dirs) return;
 
-            const name = self.entries.getNameAtEntryIndex(self.cursor);
+            const name = self.entries.getNameAtEntryIndex(@intCast(self.cursor));
             self.cursor = 0;
 
             const curr_selection = try self.findTruesAndNames(allocator);
@@ -266,13 +249,16 @@ pub fn handleEvent(
             }
 
             try std.process.changeCurDir(name);
+            // TODO: This is a syscall, this can be fixed to be handled only by
+            // application logic, just append whatever 'name' is to the path using
+            // FixedSizedStream
             const path = try std.process.getCwd(buffer);
             self.cwd = path;
 
             self.clearEntries();
-            try self.appendCwdEntries(allocator);
+            try self.indexFilesCwd(allocator);
 
-            try self.resetSelectionAndResize(self.entries.len());
+            try self.resetSelectionAndResize();
 
             if (hash_map.getEntry(self.cwd)) |entry| {
                 self.n_selected = entry.value_ptr.idxs.len;
@@ -283,28 +269,27 @@ pub fn handleEvent(
                 allocator.free(entry.value_ptr.idxs);
                 allocator.free(entry.value_ptr.names);
                 allocator.free(entry.key_ptr.*);
-                _ = hash_map.removeByPtr(entry.key_ptr);
+                // NOTE: Temporary debug logic to make sure entries are removed
+                if (hash_map.swapRemove(self.cwd)) unreachable;
             } else {
                 self.n_selected = 0;
             }
         },
 
-        .top => {
-            self.cursor = 0;
-        },
+        .top => self.cursor = 0,
 
-        .bottom => {
-            self.cursor = total_index;
-        },
+        .bottom => self.cursor = @intCast(self.entries.len() - 1),
 
         // Selections
         .select_entry => {
-            self.selection.items[self.cursor] = !self.selection.items[self.cursor];
-            if (self.selection.items[self.cursor])
+            if (self.entries.len() == 0) return;
+            const casted: usize = @intCast(self.cursor);
+            self.selection.items[casted] = !self.selection.items[casted];
+            if (self.selection.items[casted])
                 self.n_selected += 1
             else
                 self.n_selected -= 1;
-            self.cursor = std.math.clamp(self.cursor + 1, 0, self.entries.len() - 1);
+            self.moveCursor(self.cursor + 1, true);
         },
 
         .select_all => {
@@ -322,7 +307,83 @@ pub fn handleEvent(
         },
 
         // Actions
-        .delete => {},
+        .delete => {
+            if (self.n_selected == 0) return;
+
+            var tmp: [4096]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&tmp);
+            const fbs_writer = fbs.writer();
+
+            // TODO: Make this a function that accepts iterator
+            // Iterate on past directories
+            var past_it = hash_map.iterator();
+            while (past_it.next()) |entry| {
+                try fbs_writer.writeAll(entry.key_ptr.*);
+                try fbs_writer.writeByte('/');
+                const write_pos = try fbs.getPos();
+
+                var str_it = std.mem.splitScalar(u8, entry.value_ptr.names, 0);
+                while (str_it.next()) |str| {
+                    try fbs.seekTo(write_pos);
+                    try fbs_writer.writeAll(str);
+                    try std.fs.deleteTreeAbsolute(fbs.getWritten());
+                }
+
+                // FIXME: Have to delete each entry as it is iterated over,
+                // otherwise this is a memory leak. This could be handled by an
+                // arena but it would mean piling up memory when a single entry
+                // is removed from the hashmap when moving left or right.
+
+                hash_map.allocator.free(entry.key_ptr.*);
+                hash_map.allocator.free(entry.value_ptr.idxs);
+                hash_map.allocator.free(entry.value_ptr.names);
+            }
+            hash_map.clearRetainingCapacity();
+
+            // TODO: Make this a function that accepts iterator
+            // Iterate on current directory selection
+            fbs.reset();
+            try fbs_writer.writeAll(self.cwd);
+            try fbs_writer.writeByte('/');
+            const write_pos = try fbs.getPos();
+
+            var rev_it = std.mem.reverseIterator(self.selection.items);
+            var idx: usize = self.selection.items.len - 1;
+            while (rev_it.next()) |selected| : (if (idx > 0) {
+                idx -= 1;
+            }) {
+                if (!selected) continue;
+
+                try fbs.seekTo(write_pos);
+                try fbs_writer.writeAll(self.entries.getNameAtEntryIndex(idx));
+                try std.fs.deleteTreeAbsolute(fbs.getWritten());
+
+                // NOTE: There could be a way to remove elements without having to
+                // iterate over the current directory again, the problem with that
+                // is the current way to store entries would require multiple stages
+                // of reordering, and moving the indices and doing math on them at
+                // the same time. Definitely possible, just don't know if worth it.
+
+                // TODO: There IS a better and more efficient way. Use an arena
+                // only for allocating the names in bulk, store an ArrayList of
+                // slices using a "cold" allocator (general purpose) to keep
+                // them alive past the arena resetting. That way when removing
+                // things you only need to make a new list without some items.
+                // Will have to benchmark to see if it is worth changing the
+                // whole system.
+            }
+
+            self.clearEntries();
+            try self.indexFilesCwd(allocator);
+            try self.resetSelectionAndResize();
+            self.resetSelection();
+            self.cursor = std.math.clamp(
+                self.cursor,
+                0,
+                @as(i32, @intCast(self.selection.items.len -| 1)),
+            );
+            self.n_selected = 0;
+        },
         .move => {},
         .paste => {},
     }
@@ -361,13 +422,18 @@ pub fn findTruesAndNames(self: Self, allocator: Allocator) !struct {
     };
 }
 
-pub fn resetSelectionAndResize(self: *Self, new_size: usize) !void {
-    try self.selection.resize(new_size);
+pub fn resetSelection(self: *Self) void {
     for (self.selection.items) |*item|
         item.* = false;
 }
 
-pub fn appendCwdEntries(self: *Self, allocator: Allocator) !void {
+pub fn resetSelectionAndResize(self: *Self) !void {
+    try self.selection.resize(self.entries.len());
+    for (self.selection.items) |*item|
+        item.* = false;
+}
+
+pub fn indexFilesCwd(self: *Self, allocator: Allocator) !void {
     var iterable_dir = try std.fs.cwd().openIterableDir(".", .{});
     defer iterable_dir.close();
 
@@ -392,7 +458,13 @@ pub fn appendCwdEntries(self: *Self, allocator: Allocator) !void {
 
     try self.entries.ensureTotalCapacity(self.entries.names.items.len + files.names.items.len);
     self.entries.names.appendSliceAssumeCapacity(files.names.items);
-    self.entries.indices.appendSliceAssumeCapacity(files.indices.items);
+
+    // FIXME: This does not apply universally, it may be the case that the amount of
+    // end indices is less than the entries. It is safer to append the slice, for
+    // now at least.
+    // self.entries.indices.appendSliceAssumeCapacity(files.indices.items);
+
+    try self.entries.indices.appendSlice(files.indices.items);
 
     self.s_win.end = blk: {
         const len = self.entries.len();
@@ -451,7 +523,7 @@ pub fn appendAboveEntries(self: *Self, allocator: Allocator) !void {
     };
 
     if (match) |index|
-        self.cursor = index
+        self.cursor = @intCast(index)
     else
         return error.NoMatchingDirFound;
 }

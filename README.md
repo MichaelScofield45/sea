@@ -1,10 +1,13 @@
-# Sea
+# `sea`
 
-A simple linux-only (for now) CLI file navigator inspired by
-[`nnn`](https://github.com/jarun/nnn). It has **zero** dependencies (not even
-ncurses) except for [Zig](https://ziglang.org/) itself, everything is part of
-the Zig Standard Library or made from scratch. It is statically compiled and
-ready to run on any linux distribution.
+A simple linux-only (for now) CLI file navigator for your sea of files,
+inspired by [`nnn`](https://github.com/jarun/nnn). `sea` aims to be fast and
+efficient in the most common actions regarding files and organization.
+
+It has **zero** dependencies (not even ncurses) except for
+[Zig](https://ziglang.org/) itself, everything is part of the Zig Standard
+Library or made from scratch. It is statically compiled and ready to run on any
+linux distribution.
 
 # Building from source
 
@@ -62,6 +65,12 @@ Or add `zig-out/bin/` to your `$PATH` environment variable.
 | <kbd>a</kbd>     | select everything in current directory |
 | <kbd>A</kbd>     | invert selection |
 
+## Filesystem Actions
+
+| Key | Action |
+|-----|--------|
+| <kbd>d</kbd> | delete selection (deletes everything recursively, be careful!)  |
+
 # Planned Features
 
 The following are ordered by priority:
@@ -73,7 +82,9 @@ The following are ordered by priority:
 - [x] Invert selection with <kbd>A</kbd>
 - [x] Properly handle arrow keys (they were removed because of overlap with
       other keys when reading byte by byte)
-- [ ] Delete selections
+- [x] Delete selections
+    - [ ] Prompt before deleting everything
 - [ ] Move selections
 - [ ] Create files and directories
 - [ ] macOS support
+- [ ] Filtering by search with <kbd>/</kbd>
