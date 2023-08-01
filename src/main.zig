@@ -9,9 +9,6 @@ const PastDir = Sea.PastDir;
 pub fn main() !void {
     const stdout_file = std.io.getStdOut();
 
-    // Enable alternative buffer
-    try stdout_file.writeAll("\x1B[?1049h");
-
     // FIXME: This errors out when using a pipe, which it should not since we are
     // using the alternative buffer.
     const config = std.io.tty.detectConfig(stdout_file);
@@ -20,9 +17,13 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
+    // Enable alternative buffer
+    try stdout_file.writeAll("\x1B[?1049h");
+
     var bw = std.io.bufferedWriter(stdout_file.writer());
     const stdout = bw.writer();
 
+    // Cold allocator
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -33,16 +34,6 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const print_selected_on_quit = blk: {
-        if (args.len == 1) break :blk false;
-
-        for (args[1..]) |arg|
-            if (std.mem.eql(u8, "-p", arg) or std.mem.eql(u8, "--picker", arg))
-                break :blk true;
-
-        break :blk false;
-    };
-
     var sea = try Sea.init(allocator, stdin_file);
     defer sea.deinit(stdin_file);
 
@@ -51,6 +42,7 @@ pub fn main() !void {
 
     try stdout.writeAll("\x1B[?25l");
 
+    // This buffer stays alive the whole program
     var cwd_buffer: [4096]u8 = undefined;
     sea.cwd = try std.process.getCwd(&cwd_buffer);
 
@@ -135,25 +127,4 @@ pub fn main() !void {
 
     // Disable alternative buffer
     try stdout_file.writeAll("\x1B[?1049l");
-
-    if (print_selected_on_quit) {
-        var it = past_dirs.iterator();
-        while (it.next()) |entry| {
-            const dirname = entry.key_ptr.*;
-            var str_it = std.mem.splitScalar(u8, entry.value_ptr.names, 0);
-            while (str_it.next()) |filename|
-                try stdout.print("{s}/{s}\x1B[1E", .{ dirname, filename });
-        }
-
-        const dirname = sea.cwd;
-        for (sea.selection.items, 0..) |item, idx| {
-            if (item) {
-                try stdout.print(
-                    "{s}/{s}\x1B[1E",
-                    .{ dirname, sea.entries.getNameAtEntryIndex(idx) },
-                );
-            }
-        }
-        try bw.flush();
-    }
 }
