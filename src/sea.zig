@@ -211,16 +211,17 @@ pub fn handleEvent(
 
             try self.resetSelectionAndResize();
 
-            if (hash_map.getEntry(self.cwd)) |entry| {
-                self.n_selected = entry.value_ptr.idxs.len;
+            if (hash_map.getIndex(self.cwd)) |idx| {
+                const values = hash_map.values();
+                self.n_selected = values[idx].idxs.len;
 
-                for (entry.value_ptr.idxs) |idx|
-                    self.selection.items[idx] = true;
+                for (values[idx].idxs) |bool_idx|
+                    self.selection.items[bool_idx] = true;
 
-                allocator.free(entry.value_ptr.idxs);
-                allocator.free(entry.value_ptr.names);
-                allocator.free(entry.key_ptr.*);
-                if (hash_map.swapRemove(self.cwd)) unreachable;
+                allocator.free(values[idx].idxs);
+                allocator.free(values[idx].names);
+                allocator.free(hash_map.keys()[idx]);
+                hash_map.swapRemoveAt(idx);
             } else {
                 self.n_selected = 0;
             }
@@ -260,17 +261,17 @@ pub fn handleEvent(
 
             try self.resetSelectionAndResize();
 
-            if (hash_map.getEntry(self.cwd)) |entry| {
-                self.n_selected = entry.value_ptr.idxs.len;
+            if (hash_map.getIndex(self.cwd)) |idx| {
+                const values = hash_map.values();
+                self.n_selected = values[idx].idxs.len;
 
-                for (entry.value_ptr.idxs) |idx|
-                    self.selection.items[idx] = true;
+                for (values[idx].idxs) |bool_idx|
+                    self.selection.items[bool_idx] = true;
 
-                allocator.free(entry.value_ptr.idxs);
-                allocator.free(entry.value_ptr.names);
-                allocator.free(entry.key_ptr.*);
-                // NOTE: Temporary debug logic to make sure entries are removed
-                if (hash_map.swapRemove(self.cwd)) unreachable;
+                allocator.free(values[idx].idxs);
+                allocator.free(values[idx].names);
+                allocator.free(hash_map.keys()[idx]);
+                hash_map.swapRemoveAt(idx);
             } else {
                 self.n_selected = 0;
             }
