@@ -4,7 +4,8 @@ const EntryList = @import("entry_list.zig");
 const Allocator = std.mem.Allocator;
 
 cursor: i32,
-entries: EntryList,
+str_arena: *std.heap.ArenaAllocator,
+names: std.ArrayList([]const u8),
 selection: std.ArrayList(bool),
 n_selected: usize,
 n_dirs: usize,
@@ -67,7 +68,7 @@ pub const Event = enum {
     }
 };
 
-pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
+pub fn init(arena: *std.heap.ArenaAllocator, cold_alloc: Allocator, stdin: std.fs.File) !Self {
     var original_termios = try std.os.tcgetattr(stdin.handle);
 
     var new = original_termios;
@@ -85,8 +86,10 @@ pub fn init(allocator: Allocator, stdin: std.fs.File) !Self {
             .height = try getTerminalHeight(stdin.handle) - 8,
             .end = 0,
         },
-        .entries = try EntryList.initCapacity(allocator, 2048),
-        .selection = try std.ArrayList(bool).initCapacity(allocator, 1024),
+        // .entries = try EntryList.initCapacity(allocator, 2048),
+        .str_arena = arena,
+        .names = try std.ArrayList([]const u8).initCapacity(cold_alloc, 1024),
+        .selection = try std.ArrayList(bool).initCapacity(cold_alloc, 1024),
         .n_selected = 0,
         .n_dirs = undefined,
     };
@@ -98,7 +101,8 @@ pub fn deinit(self: *Self, stdin: std.fs.File) void {
         std.process.exit(1);
     };
 
-    self.entries.deinit();
+    // self.entries.deinit();
+    self.names.deinit();
     self.selection.deinit();
 }
 
@@ -114,7 +118,7 @@ fn getTerminalHeight(stdin_handle: std.os.fd_t) !u32 {
 pub fn printStatus(self: Self, writer: anytype, past_selected: usize) !void {
     try writer.print("\x1B[34m{s}\x1B[0m\x1B[1E", .{self.cwd});
 
-    const entries_len = self.entries.len();
+    const entries_len = self.names.items.len;
     try writer.print("{} / {}", .{ self.cursor + 1, entries_len });
 
     const total_selected = self.n_selected + past_selected;
@@ -125,14 +129,14 @@ pub fn printStatus(self: Self, writer: anytype, past_selected: usize) !void {
 }
 
 pub fn printEntries(self: Self, writer: anytype) !void {
-    const height = if (self.s_win.height > self.entries.len())
-        self.entries.len()
+    const height = if (self.s_win.height > self.names.items.len)
+        self.names.items.len
     else
         self.s_win.height;
     const end = self.s_win.end;
     const start = end - height;
 
-    for (self.entries.getIndices()[start..][0..height], start..) |_, n_entry| {
+    for (self.names.items[start..][0..height], start..) |_, n_entry| {
         if (self.selection.items[n_entry])
             try writer.writeAll("\x1B[30;42m>\x1B[0m")
         else
@@ -144,15 +148,14 @@ pub fn printEntries(self: Self, writer: anytype) !void {
         if (n_entry == self.cursor)
             try writer.writeAll("\x1B[7m");
 
-        try writer.writeAll(self.entries.getNameAtEntryIndex(n_entry));
+        try writer.writeAll(self.names.items[n_entry]);
 
         try writer.writeAll("\x1B[0m\x1B[1E");
     }
 }
 
 pub fn clearEntries(self: *Self) void {
-    self.entries.names.clearRetainingCapacity();
-    self.entries.indices.clearRetainingCapacity();
+    self.names.clearRetainingCapacity();
 }
 
 pub const PastDir = struct {
@@ -162,9 +165,9 @@ pub const PastDir = struct {
 
 fn moveCursor(self: *Self, new_pos: i32, clamp: bool) void {
     if (new_pos < 0)
-        self.cursor = @intCast(self.entries.len() - 1)
-    else if (new_pos > self.entries.len() - 1)
-        self.cursor = if (clamp) @intCast(self.entries.len() - 1) else 0
+        self.cursor = @intCast(self.names.items.len - 1)
+    else if (new_pos > self.names.items.len - 1)
+        self.cursor = if (clamp) @intCast(self.names.items.len - 1) else 0
     else
         self.cursor = new_pos;
 }
@@ -195,8 +198,9 @@ pub fn handleEvent(
                 );
             }
 
+            _ = self.str_arena.reset(.retain_capacity);
             self.clearEntries();
-            self.appendAboveEntries(allocator) catch |err| switch (err) {
+            self.appendAboveEntries() catch |err| switch (err) {
                 error.NoMatchingDirFound => {},
                 else => return err,
             };
@@ -231,7 +235,7 @@ pub fn handleEvent(
         .right => {
             if (self.cursor > self.n_dirs) return;
 
-            const name = self.entries.getNameAtEntryIndex(@intCast(self.cursor));
+            const name = self.names.items[@intCast(self.cursor)];
             self.cursor = 0;
 
             const curr_selection = try self.findTruesAndNames(allocator);
@@ -253,8 +257,9 @@ pub fn handleEvent(
             const path = try std.process.getCwd(buffer);
             self.cwd = path;
 
+            _ = self.str_arena.reset(.retain_capacity);
             self.clearEntries();
-            try self.indexFilesCwd(allocator);
+            try self.indexFilesCwd();
 
             try self.resetSelectionAndResize();
 
@@ -276,11 +281,11 @@ pub fn handleEvent(
 
         .top => self.cursor = 0,
 
-        .bottom => self.cursor = @intCast(self.entries.len() - 1),
+        .bottom => self.cursor = @intCast(self.names.items.len - 1),
 
         // Selections
         .select_entry => {
-            if (self.entries.len() == 0) return;
+            if (self.names.items.len == 0) return;
             const casted: usize = @intCast(self.cursor);
             self.selection.items[casted] = !self.selection.items[casted];
             if (self.selection.items[casted])
@@ -294,14 +299,14 @@ pub fn handleEvent(
             for (self.selection.items) |*item|
                 item.* = true;
 
-            self.n_selected = self.entries.len();
+            self.n_selected = self.names.items.len;
         },
 
         .select_invert => {
             for (self.selection.items) |*item|
                 item.* = !item.*;
 
-            self.n_selected = self.entries.len() - self.n_selected;
+            self.n_selected = self.names.items.len - self.n_selected;
         },
 
         // Actions
@@ -353,7 +358,7 @@ pub fn handleEvent(
                 if (!selected) continue;
 
                 try fbs.seekTo(write_pos);
-                try fbs_writer.writeAll(self.entries.getNameAtEntryIndex(idx));
+                try fbs_writer.writeAll(self.names.items[idx]);
                 try std.fs.deleteTreeAbsolute(fbs.getWritten());
 
                 // NOTE: There could be a way to remove elements without having to
@@ -372,7 +377,7 @@ pub fn handleEvent(
             }
 
             self.clearEntries();
-            try self.indexFilesCwd(allocator);
+            try self.indexFilesCwd();
             try self.resetSelectionAndResize();
             self.resetSelection();
             self.cursor = std.math.clamp(
@@ -386,7 +391,7 @@ pub fn handleEvent(
         .paste => {},
     }
 
-    const new_len = self.entries.len();
+    const new_len = self.names.items.len;
     const relative_height = if (self.s_win.height > new_len) new_len else self.s_win.height;
 
     if (new_len == 0) return;
@@ -407,7 +412,7 @@ pub fn findTruesAndNames(self: Self, allocator: Allocator) !struct {
     for (self.selection.items, 0..) |single_bool, idx| {
         if (single_bool) {
             try idxs.append(@intCast(idx));
-            try names.appendSlice(self.entries.getNameAtEntryIndex(idx));
+            try names.appendSlice(self.names.items[idx]);
             try names.append(0);
         }
     }
@@ -426,61 +431,55 @@ pub fn resetSelection(self: *Self) void {
 }
 
 pub fn resetSelectionAndResize(self: *Self) !void {
-    try self.selection.resize(self.entries.len());
+    try self.selection.resize(self.names.items.len);
     for (self.selection.items) |*item|
         item.* = false;
 }
 
-pub fn indexFilesCwd(self: *Self, allocator: Allocator) !void {
+pub fn indexFilesCwd(self: *Self) !void {
     var iterable_dir = try std.fs.cwd().openIterableDir(".", .{});
     defer iterable_dir.close();
 
-    var files = try EntryList.initCapacity(allocator, 1024);
+    const arena_alloc = self.str_arena.allocator();
+
+    var files = try std.ArrayList([]const u8).initCapacity(arena_alloc, 1024);
     defer files.deinit();
 
     var it = iterable_dir.iterate();
     while (try it.next()) |entry| {
-        if (entry.kind == .directory and !std.mem.startsWith(u8, entry.name, ".")) {
-            try self.entries.append(entry.name);
+        if (std.mem.startsWith(u8, entry.name, ".")) continue;
+
+        const mem = try arena_alloc.dupe(u8, entry.name);
+        if (entry.kind == .directory) {
+            try self.names.append(mem);
         } else {
-            if (!std.mem.startsWith(u8, entry.name, "."))
-                try files.append(entry.name);
+            try files.append(mem);
         }
     }
 
-    self.n_dirs = self.entries.len();
+    self.n_dirs = self.names.items.len;
 
-    const last = if (self.entries.indices.getLastOrNull()) |last| last else 0;
-    for (files.indices.items) |*idx|
-        idx.* += last;
-
-    try self.entries.ensureTotalCapacity(self.entries.names.items.len + files.names.items.len);
-    self.entries.names.appendSliceAssumeCapacity(files.names.items);
-
-    // FIXME: This does not apply universally, it may be the case that the amount of
-    // end indices is less than the entries. It is safer to append the slice, for
-    // now at least.
-    // self.entries.indices.appendSliceAssumeCapacity(files.indices.items);
-
-    try self.entries.indices.appendSlice(files.indices.items);
+    try self.names.ensureTotalCapacity(self.names.items.len + files.items.len);
+    self.names.appendSliceAssumeCapacity(files.items);
 
     self.s_win.end = blk: {
-        const len = self.entries.len();
-        if (len < self.s_win.height) {
-            break :blk @intCast(len);
-        } else {
-            break :blk self.s_win.height;
-        }
+        const len = self.names.items.len;
+        break :blk if (len < self.s_win.height)
+            @intCast(len)
+        else
+            self.s_win.height;
     };
 }
 
 /// Appends all entries of the above directory, returning which entry matches the
 /// current working directory
-pub fn appendAboveEntries(self: *Self, allocator: Allocator) !void {
+pub fn appendAboveEntries(self: *Self) !void {
     var iterable_dir = try std.fs.cwd().openIterableDir("..", .{});
     defer iterable_dir.close();
 
-    var files = try EntryList.initCapacity(allocator, 1024);
+    const arena_alloc = self.str_arena.allocator();
+
+    var files = try std.ArrayList([]const u8).initCapacity(arena_alloc, 1024);
     defer files.deinit();
 
     var match: ?usize = null;
@@ -489,35 +488,31 @@ pub fn appendAboveEntries(self: *Self, allocator: Allocator) !void {
     var count: usize = 0;
 
     while (try it.next()) |entry| {
-        if (entry.kind == .directory and !std.mem.startsWith(u8, entry.name, ".")) {
-            try self.entries.append(entry.name);
+        if (std.mem.startsWith(u8, entry.name, ".")) continue;
+
+        const mem = try arena_alloc.dupe(u8, entry.name);
+        if (entry.kind == .directory) {
+            try self.names.append(mem);
             if (std.mem.eql(u8, std.fs.path.basename(self.cwd), entry.name))
                 match = count;
 
             count += 1;
         } else {
-            if (!std.mem.startsWith(u8, entry.name, "."))
-                try files.append(entry.name);
+            try files.append(mem);
         }
     }
 
-    self.n_dirs = self.entries.len();
+    self.n_dirs = self.names.items.len;
 
-    const last = if (self.entries.indices.getLastOrNull()) |last| last else 0;
-    for (files.indices.items) |*idx|
-        idx.* += last;
-
-    try self.entries.ensureTotalCapacity(self.entries.names.items.len + files.names.items.len);
-    self.entries.names.appendSliceAssumeCapacity(files.names.items);
-    self.entries.indices.appendSliceAssumeCapacity(files.indices.items);
+    try self.names.ensureTotalCapacity(self.names.items.len + files.items.len);
+    self.names.appendSliceAssumeCapacity(files.items);
 
     self.s_win.end = blk: {
-        const len = self.entries.len();
-        if (len < self.s_win.height) {
-            break :blk @intCast(len);
-        } else {
-            break :blk self.s_win.height;
-        }
+        const len = self.names.items.len;
+        break :blk if (len < self.s_win.height)
+            @intCast(len)
+        else
+            self.s_win.height;
     };
 
     if (match) |index|

@@ -31,13 +31,16 @@ pub fn main() !void {
     const stdin_file = std.io.getStdIn();
     const stdin = stdin_file.reader();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // const args = try std.process.argsAlloc(allocator);
+    // defer std.process.argsFree(allocator, args);
 
-    var sea = try Sea.init(allocator, stdin_file);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    var sea = try Sea.init(&arena, allocator, stdin_file);
     defer sea.deinit(stdin_file);
 
-    try sea.indexFilesCwd(allocator);
+    try sea.indexFilesCwd();
     try sea.resetSelectionAndResize();
 
     try stdout.writeAll("\x1B[?25l");
@@ -83,9 +86,9 @@ pub fn main() !void {
         if (builtin.mode == .Debug) {
             try stdout.print("Loop time: {}\x1B[1E", .{std.fmt.fmtDuration(end)});
             try stdout.print("Memory allocated: {d:.1}\x1B[1E", .{
-                std.fmt.fmtIntSizeDec(sea.entries.names.allocatedSlice().len +
-                    sea.entries.indices.allocatedSlice().len +
-                    sea.selection.items.len),
+                std.fmt.fmtIntSizeDec(sea.names.allocatedSlice().len +
+                    sea.selection.allocatedSlice().len +
+                    arena.queryCapacity()),
             });
             try stdout.print("Terminal size: {} rows\x1B[1E", .{sea.s_win.height});
             try stdout.print("Scroll window: {}\x1B[1E", .{sea.s_win});
