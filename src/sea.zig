@@ -1,20 +1,15 @@
 const std = @import("std");
 const linux = std.os.linux;
-const EntryList = @import("entry_list.zig");
 const Allocator = std.mem.Allocator;
 
-cursor: i32,
+cursor: usize,
+render_idx: usize,
+term_height: u16,
 str_arena: *std.heap.ArenaAllocator,
 names: std.ArrayList([]const u8),
 selection: std.ArrayList(bool),
 n_selected: usize,
 n_dirs: usize,
-
-/// Scroll window for smooth scrolling and rendering
-s_win: struct {
-    height: u32,
-    end: u32,
-},
 cwd: []const u8,
 original_termios: std.os.termios,
 
@@ -80,13 +75,10 @@ pub fn init(arena: *std.heap.ArenaAllocator, cold_alloc: Allocator, stdin: std.f
 
     return .{
         .cursor = 0,
+        .render_idx = 0,
+        .term_height = try getTerminalHeight(stdin.handle) - 7,
         .cwd = undefined,
         .original_termios = original_termios,
-        .s_win = .{
-            .height = try getTerminalHeight(stdin.handle) - 8,
-            .end = 0,
-        },
-        // .entries = try EntryList.initCapacity(allocator, 2048),
         .str_arena = arena,
         .names = try std.ArrayList([]const u8).initCapacity(cold_alloc, 1024),
         .selection = try std.ArrayList(bool).initCapacity(cold_alloc, 1024),
@@ -106,13 +98,13 @@ pub fn deinit(self: *Self, stdin: std.fs.File) void {
     self.selection.deinit();
 }
 
-fn getTerminalHeight(stdin_handle: std.os.fd_t) !u32 {
+fn getTerminalHeight(handle: std.os.fd_t) !u16 {
     var size: linux.winsize = undefined;
     // TODO: Handle error with errno
-    if (linux.ioctl(stdin_handle, linux.T.IOCGWINSZ, @intFromPtr(&size)) != 0)
+    if (linux.ioctl(handle, linux.T.IOCGWINSZ, @intFromPtr(&size)) != 0)
         return error.IoctlError;
 
-    return @as(u32, size.ws_row);
+    return size.ws_row;
 }
 
 pub fn printStatus(self: Self, writer: anytype, past_selected: usize) !void {
@@ -129,15 +121,20 @@ pub fn printStatus(self: Self, writer: anytype, past_selected: usize) !void {
 }
 
 pub fn printEntries(self: Self, writer: anytype) !void {
-    const height = if (self.s_win.height > self.names.items.len)
+    const start = self.render_idx;
+    const height = self.term_height;
+    // NOTE: Verify this math is correct
+    const len = if (height > self.names.items.len - start)
         self.names.items.len
     else
-        self.s_win.height;
-    const end = self.s_win.end;
-    const start = end - height;
+        height;
 
-    for (self.names.items[start..][0..height], start..) |_, n_entry| {
-        if (self.selection.items[n_entry])
+    for (
+        self.names.items[start..][0..len],
+        self.selection.items[start..][0..len],
+        start..,
+    ) |name, bool_item, n_entry| {
+        if (bool_item)
             try writer.writeAll("\x1B[30;42m>\x1B[0m")
         else
             try writer.writeAll("\x1B[0m ");
@@ -148,7 +145,7 @@ pub fn printEntries(self: Self, writer: anytype) !void {
         if (n_entry == self.cursor)
             try writer.writeAll("\x1B[7m");
 
-        try writer.writeAll(self.names.items[n_entry]);
+        try writer.writeAll(name);
 
         try writer.writeAll("\x1B[0m\x1B[1E");
     }
@@ -163,13 +160,22 @@ pub const PastDir = struct {
     names: []const u8,
 };
 
-fn moveCursor(self: *Self, new_pos: i32, clamp: bool) void {
-    if (new_pos < 0)
-        self.cursor = @intCast(self.names.items.len - 1)
-    else if (new_pos > self.names.items.len - 1)
-        self.cursor = if (clamp) @intCast(self.names.items.len - 1) else 0
-    else
-        self.cursor = new_pos;
+fn moveCursorPos(self: Self, offset: i32, clamp: bool) usize {
+    const abs: usize = std.math.absCast(offset);
+    const new_pos = blk: {
+        if (offset < 0) {
+            break :blk if (clamp)
+                self.cursor -| abs
+            else
+                std.math.sub(usize, self.cursor, abs) catch self.names.items.len -| 1;
+        } else {
+            if (self.cursor + abs > self.names.items.len - 1)
+                break :blk if (clamp) self.names.items.len - 1 else 0
+            else
+                break :blk self.cursor + abs;
+        }
+    };
+    return new_pos;
 }
 
 pub fn handleEvent(
@@ -228,9 +234,9 @@ pub fn handleEvent(
             }
         },
 
-        .down => self.moveCursor(self.cursor + 1, false),
+        .down => self.cursor = self.moveCursorPos(1, false),
 
-        .up => self.moveCursor(self.cursor - 1, false),
+        .up => self.cursor = self.moveCursorPos(-1, false),
 
         .right => {
             if (self.cursor > self.n_dirs) return;
@@ -292,7 +298,7 @@ pub fn handleEvent(
                 self.n_selected += 1
             else
                 self.n_selected -= 1;
-            self.moveCursor(self.cursor + 1, true);
+            self.cursor = self.moveCursorPos(1, true);
         },
 
         .select_all => {
@@ -332,7 +338,7 @@ pub fn handleEvent(
                     try std.fs.deleteTreeAbsolute(fbs.getWritten());
                 }
 
-                // FIXME: Have to delete each entry as it is iterated over,
+                // NOTE: Have to delete each entry as it is iterated over,
                 // otherwise this is a memory leak. This could be handled by an
                 // arena but it would mean piling up memory when a single entry
                 // is removed from the hashmap when moving left or right.
@@ -343,64 +349,50 @@ pub fn handleEvent(
             }
             hash_map.clearRetainingCapacity();
 
-            // TODO: Make this a function that accepts iterator
+            // TODO: Make this a function
             // Iterate on current directory selection
             fbs.reset();
+
+            if (self.n_selected == 0) return;
+
             try fbs_writer.writeAll(self.cwd);
             try fbs_writer.writeByte('/');
             const write_pos = try fbs.getPos();
 
-            var rev_it = std.mem.reverseIterator(self.selection.items);
-            var idx: usize = self.selection.items.len - 1;
-            while (rev_it.next()) |selected| : (if (idx > 0) {
-                idx -= 1;
-            }) {
-                if (!selected) continue;
+            var new_list = try std.ArrayList([]const u8).initCapacity(allocator, self.names.items.len);
+            for (self.selection.items, 0..) |selected, idx| {
+                if (!selected) {
+                    new_list.appendAssumeCapacity(self.names.items[idx]);
+                    continue;
+                }
 
                 try fbs.seekTo(write_pos);
                 try fbs_writer.writeAll(self.names.items[idx]);
                 try std.fs.deleteTreeAbsolute(fbs.getWritten());
-
-                // NOTE: There could be a way to remove elements without having to
-                // iterate over the current directory again, the problem with that
-                // is the current way to store entries would require multiple stages
-                // of reordering, and moving the indices and doing math on them at
-                // the same time. Definitely possible, just don't know if worth it.
-
-                // TODO: There IS a better and more efficient way. Use an arena
-                // only for allocating the names in bulk, store an ArrayList of
-                // slices using a "cold" allocator (general purpose) to keep
-                // them alive past the arena resetting. That way when removing
-                // things you only need to make a new list without some items.
-                // Will have to benchmark to see if it is worth changing the
-                // whole system.
             }
 
-            self.clearEntries();
-            try self.indexFilesCwd();
+            self.names.deinit();
+            const slice = try new_list.toOwnedSlice();
+            self.names = std.ArrayList([]const u8).fromOwnedSlice(allocator, slice);
+
             try self.resetSelectionAndResize();
             self.resetSelection();
             self.cursor = std.math.clamp(
                 self.cursor,
                 0,
-                @as(i32, @intCast(self.selection.items.len -| 1)),
+                self.names.items.len -| 1,
             );
             self.n_selected = 0;
+
         },
         .move => {},
         .paste => {},
     }
 
-    const new_len = self.names.items.len;
-    const relative_height = if (self.s_win.height > new_len) new_len else self.s_win.height;
-
-    if (new_len == 0) return;
-
-    if (self.cursor >= self.s_win.end) {
-        self.s_win.end = @intCast(self.cursor + 1);
-    } else if (self.cursor < self.s_win.end - relative_height) {
-        self.s_win.end = @as(u32, @intCast(self.cursor)) + self.s_win.height;
-    }
+    if (self.cursor >= self.render_idx + self.term_height)
+        self.render_idx = @as(usize, @intCast(self.cursor)) - self.term_height + 1
+    else if (self.cursor < self.render_idx)
+        self.render_idx = @as(usize, @intCast(self.cursor));
 }
 
 pub fn findTruesAndNames(self: Self, allocator: Allocator) !struct {
@@ -461,14 +453,6 @@ pub fn indexFilesCwd(self: *Self) !void {
 
     try self.names.ensureTotalCapacity(self.names.items.len + files.items.len);
     self.names.appendSliceAssumeCapacity(files.items);
-
-    self.s_win.end = blk: {
-        const len = self.names.items.len;
-        break :blk if (len < self.s_win.height)
-            @intCast(len)
-        else
-            self.s_win.height;
-    };
 }
 
 /// Appends all entries of the above directory, returning which entry matches the
@@ -506,14 +490,6 @@ pub fn appendAboveEntries(self: *Self) !void {
 
     try self.names.ensureTotalCapacity(self.names.items.len + files.items.len);
     self.names.appendSliceAssumeCapacity(files.items);
-
-    self.s_win.end = blk: {
-        const len = self.names.items.len;
-        break :blk if (len < self.s_win.height)
-            @intCast(len)
-        else
-            self.s_win.height;
-    };
 
     if (match) |index|
         self.cursor = @intCast(index)

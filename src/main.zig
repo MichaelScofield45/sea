@@ -23,7 +23,7 @@ pub fn main() !void {
     var bw = std.io.bufferedWriter(stdout_file.writer());
     const stdout = bw.writer();
 
-    // Cold allocator
+    // Cold allocator, they outlive the arena reset
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -31,9 +31,7 @@ pub fn main() !void {
     const stdin_file = std.io.getStdIn();
     const stdin = stdin_file.reader();
 
-    // const args = try std.process.argsAlloc(allocator);
-    // defer std.process.argsFree(allocator, args);
-
+    // Quick allocations that are nuked with each change of directory
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
@@ -45,6 +43,10 @@ pub fn main() !void {
 
     try stdout.writeAll("\x1B[?25l");
 
+    // FIXME: TL;DR: There is no real maximum path length for Linux.
+    // This is the maximum length for a path that a syscall can take for moving
+    // around, but it can be worked around using relative paths to save on
+    // bytes.
     // This buffer stays alive the whole program
     var cwd_buffer: [4096]u8 = undefined;
     sea.cwd = try std.process.getCwd(&cwd_buffer);
@@ -90,8 +92,6 @@ pub fn main() !void {
                     sea.selection.allocatedSlice().len +
                     arena.queryCapacity()),
             });
-            try stdout.print("Terminal size: {} rows\x1B[1E", .{sea.s_win.height});
-            try stdout.print("Scroll window: {}\x1B[1E", .{sea.s_win});
             try stdout.print("Cursor selection index: {}\x1B[1E", .{sea.cursor});
         }
 
