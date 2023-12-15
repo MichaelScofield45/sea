@@ -5,13 +5,8 @@ const linux = std.os.linux;
 const page_allocator = std.heap.page_allocator;
 const builtin = @import("builtin");
 
-// stdout: std.io.BufferedWriter,
-// stdin: std.io.Reader,
-
-pub const PastDir = struct {
-    sels: []const bool,
-    names: []const u8,
-};
+const ByteList = std.ArrayList(u8);
+const Window = @import("Window.zig");
 
 const Self = @This();
 
@@ -66,29 +61,6 @@ pub const Action = enum {
     }
 };
 
-const DirChange = enum {
-    backwards,
-    forwards,
-};
-
-pub const EntryList = std.MultiArrayList(Entry);
-
-fn seaInit(stdout: std.fs.File, stdin: std.fs.File, original_termios: std.os.linux.termios) !void {
-    try stdout.writeAll("\x1b[?25l\x1b[?1049h");
-
-    var new_termios = original_termios;
-    new_termios.iflag &= ~(linux.BRKINT | linux.ICRNL | linux.INPCK | linux.ISTRIP | linux.IXON);
-    new_termios.oflag &= ~(linux.OPOST);
-    new_termios.cflag |= (linux.CS8);
-    new_termios.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
-    try std.os.tcsetattr(stdin.handle, .FLUSH, new_termios);
-}
-
-fn seaDeinit(stdout: std.fs.File, stdin: std.fs.File, original_termios: std.os.linux.termios) void {
-    defer std.os.tcsetattr(stdin.handle, .FLUSH, original_termios) catch unreachable;
-    stdout.writeAll("\x1b[?1049l\x1b[0m\x1b[?25h") catch unreachable;
-}
-
 pub fn main() !void {
     const stdout_f = std.io.getStdOut();
 
@@ -110,10 +82,18 @@ pub fn main() !void {
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    var path = try getCwdPath(arena_alloc, gpa_alloc);
+    defer path.deinit();
+
+    var files = try getCwdFiles(arena_alloc, path.items);
+    var sel = try allocBoolSlice(arena_alloc, files.len, false);
+    var n_sel: usize = 0;
+    var win = Window{ .start = 0, .len = 39 };
+
     try clearScreen(stdout);
-    var cwd_files = try getCwdFiles(arena_alloc);
-    var sel = try allocBoolSlice(arena_alloc, cwd_files.len, false);
-    try printCwdFiles(stdout, cwd_files, 0, sel);
+    try printPath(stdout, path.items);
+    try printSelection(stdout, n_sel);
+    try printFiles(stdout, files, 0, sel, win);
     try bw.flush();
 
     var running = true;
@@ -123,118 +103,184 @@ pub fn main() !void {
         _ = try stdin.read(&char_buf);
 
         const action = Action.fromInput(char_buf) orelse continue;
-        const dir_change = try handleAction(stdout, &running, action, cwd_files, sel, &cursor);
 
-        if (dir_change) |direction| {
-            switch (direction) {
-                .backwards => {
-                    try std.process.changeCurDir("..");
-                    // TODO: this needs to search for the bast current dir
-                    cursor = 0;
-                },
-                .forwards => {
-                    const new_dir = cwd_files[cursor].name;
-                    try std.process.changeCurDir(new_dir);
-                    cursor = 0;
-                },
-            }
+        switch (action) {
+            .quit => running = false,
 
-            if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
-            try clearScreen(stdout);
-            cwd_files = try getCwdFiles(arena_alloc);
-            sel = try allocBoolSlice(arena_alloc, cwd_files.len, false);
-            try printCwdFiles(stdout, cwd_files, cursor, sel);
+            .up, .down => |direction| {
+                if (direction == .up) {
+                    if (cursor != 0) {
+                        cursor -= 1;
+                        win.scrollUp(cursor);
+                    } else {
+                        cursor = files.len -| 1;
+                        win.scrollDown(cursor);
+                    }
+                } else {
+                    if (cursor != files.len -| 1) {
+                        cursor += 1;
+                        win.scrollDown(cursor);
+                    } else {
+                        cursor = 0;
+                        win.scrollUp(cursor);
+                    }
+                }
+            },
+
+            .left, .right => |move| {
+                if (files[cursor].kind != .directory) continue;
+
+                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+                if (move == .left) {
+                    const dir_name = std.fs.path.basename(path.items);
+                    moveLeft(&path);
+                    files = try getCwdFiles(arena_alloc, path.items);
+                    cursor = findCursorPos(dir_name, files) orelse cursor;
+                } else {
+                    const dir_name = files[cursor].name;
+                    try moveRight(&path, dir_name);
+                    files = try getCwdFiles(arena_alloc, path.items);
+                    cursor = 0;
+                }
+
+                if (n_sel > 0) try saveDir();
+                n_sel = 0;
+                sel = try allocBoolSlice(arena_alloc, files.len, false);
+            },
+
+            .bottom => {
+                cursor = files.len -| 1;
+                win.scrollDown(cursor);
+            },
+
+            .top => {
+                cursor = 0;
+                win.scrollUp(cursor);
+            },
+
+            .select_toggle => {
+                sel[cursor] = !sel[cursor];
+                n_sel = if (sel[cursor]) n_sel + 1 else n_sel - 1;
+                cursor += if (cursor + 1 < files.len) 1 else 0;
+            },
+
+            .select_invert => {
+                for (sel) |*bool_val|
+                    bool_val.* = !bool_val.*;
+
+                n_sel = files.len - n_sel;
+            },
+
+            .select_all => {
+                for (sel) |*bool_val|
+                    bool_val.* = true;
+
+                n_sel = files.len;
+            },
+
+            else => {},
         }
+
+        try clearScreen(stdout);
+        try printPath(stdout, path.items);
+        try printSelection(stdout, n_sel);
+        try printFiles(stdout, files, cursor, sel, win);
 
         try bw.flush();
     }
 
-    // Setup cd on quit if available
-    var cd_quit: ?[]const u8 = null;
-    defer if (cd_quit) |allocation| gpa_alloc.free(allocation);
-
-    if (std.process.hasEnvVarConstant("SEA_TMPFILE"))
-        cd_quit = try std.process.getEnvVarOwned(gpa_alloc, "SEA_TMPFILE");
+    // TODO: setup cd on quit if available
+    // var cd_quit: ?[]const u8 = null;
+    // defer if (cd_quit) |allocation| gpa_alloc.free(allocation);
+    //
+    // if (std.process.hasEnvVarConstant("SEA_TMPFILE"))
+    //     cd_quit = try std.process.getEnvVarOwned(gpa_alloc, "SEA_TMPFILE");
 }
 
-fn handleAction(
-    writer: anytype,
-    running: *bool,
-    action: Action,
-    files: []Entry,
-    selection: []bool,
-    cursor: *usize,
-) !?DirChange {
-    switch (action) {
-        .quit => running.* = false,
+fn seaInit(stdout: std.fs.File, stdin: std.fs.File, original_termios: std.os.linux.termios) !void {
+    try stdout.writeAll("\x1b[?25l\x1b[?1049h");
 
-        .up, .down => |direction| {
-            if (direction == .up)
-                cursor.* = std.math.sub(usize, cursor.*, 1) catch files.len -| 1
-            else
-                cursor.* = if (cursor.* + 1 >= files.len) 0 else cursor.* + 1;
-            try clearScreen(writer);
-            try printCwdFiles(writer, files, cursor.*, selection);
-        },
+    var new_termios = original_termios;
+    new_termios.iflag &= ~(linux.BRKINT | linux.ICRNL | linux.INPCK | linux.ISTRIP | linux.IXON);
+    new_termios.oflag &= ~(linux.OPOST);
+    new_termios.cflag |= (linux.CS8);
+    new_termios.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
+    try std.os.tcsetattr(stdin.handle, .FLUSH, new_termios);
+}
 
-        .left => return .backwards,
+fn seaDeinit(stdout: std.fs.File, stdin: std.fs.File, original_termios: std.os.linux.termios) void {
+    defer std.os.tcsetattr(stdin.handle, .FLUSH, original_termios) catch unreachable;
+    stdout.writeAll("\x1b[?1049l\x1b[0m\x1b[?25h") catch unreachable;
+}
 
-        .right => return .forwards,
+fn moveLeft(path: *ByteList) void {
+    const new_len = blk: {
+        const dirname = std.fs.path.dirname(path.items) orelse path.items;
+        break :blk dirname.len;
+    };
+    path.items.len = new_len;
+}
 
-        .bottom => {
-            cursor.* = files.len -| 1;
-            try clearScreen(writer);
-            try printCwdFiles(writer, files, cursor.*, selection);
-        },
+fn moveRight(path: *ByteList, postfix: []const u8) !void {
+    const writer = path.writer();
+    if (path.items.len != 1)
+        try writer.print("/{s}", .{postfix})
+    else
+        try writer.print("{s}", .{postfix});
+}
 
-        .top => {
-            cursor.* = 0;
-            try clearScreen(writer);
-            try printCwdFiles(writer, files, cursor.*, selection);
-        },
-
-        .select_toggle => {
-            selection[cursor.*] = !selection[cursor.*];
-            cursor.* += 1;
-            try clearScreen(writer);
-            try printCwdFiles(writer, files, cursor.*, selection);
-        },
-
-        .select_invert => {
-            for (selection) |*bool_val|
-                bool_val.* = !bool_val.*;
-            try clearScreen(writer);
-            try printCwdFiles(writer, files, cursor.*, selection);
-        },
-
-        .select_all => {
-            for (selection) |*bool_val|
-                bool_val.* = true;
-            try clearScreen(writer);
-            try printCwdFiles(writer, files, cursor.*, selection);
-        },
-
-        else => {},
+fn findCursorPos(name: []const u8, files: []const Entry) ?usize {
+    for (files, 0..) |file, idx| {
+        if (std.mem.eql(u8, file.name, name)) return idx;
     }
 
     return null;
+}
+
+fn saveDir() !void {
+    return;
+}
+
+fn getCwdPath(arena: Allocator, gpa: Allocator) !ByteList {
+    const cwd = try std.process.getCwdAlloc(arena);
+    var list = ByteList.init(gpa);
+    try list.appendSlice(cwd);
+    return list;
 }
 
 fn clearScreen(writer: anytype) !void {
     try writer.writeAll("\x1b[2J\x1b[H");
 }
 
-fn printCwdFiles(
+fn printPath(writer: anytype, path: []const u8) !void {
+    return try writer.print("{s}\x1b[1E", .{path});
+}
+
+fn printSelection(writer: anytype, n_selection: usize) !void {
+    return if (n_selection > 0)
+        try writer.print("\x1b[30;42m {} \x1b[0m\x1b[2E", .{n_selection})
+    else
+        try writer.writeAll("\x1b[2E");
+}
+
+fn printFiles(
     writer: anytype,
-    cwd_files: []const std.fs.Dir.Entry,
+    files: []const std.fs.Dir.Entry,
     cursor: usize,
     selection: []bool,
+    win: Window,
 ) !void {
     const line_down = "\x1b[1E";
     const reverse = "\x1b[7m";
     const reset = "\x1b[0m";
 
-    for (cwd_files, selection, 0..) |file, sel, idx| {
+    const start = win.start;
+    const end = if (start + win.len > files.len)
+        files.len - start
+    else
+        win.len;
+
+    for (files[start..][0..end], selection[start..][0..end], start..) |file, sel, idx| {
         if (!sel) {
             try writer.writeAll(" ");
         } else {
@@ -261,8 +307,8 @@ fn styleFromKind(kind: Entry.Kind) []const u8 {
     };
 }
 
-fn getCwdFiles(arena: Allocator) ![]Entry {
-    var cwd = try std.fs.cwd().openDir(".", .{ .iterate = true });
+fn getCwdFiles(arena: Allocator, path: []const u8) ![]Entry {
+    var cwd = try std.fs.openDirAbsolute(path, .{ .iterate = true });
     var dir_iter = cwd.iterate();
     var list = std.ArrayList(std.fs.Dir.Entry).init(arena);
     while (try dir_iter.next()) |entry| {
