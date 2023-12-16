@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 
 const ByteList = std.ArrayList(u8);
 const Window = @import("Window.zig");
+const History = @import("History.zig");
 
 const Self = @This();
 
@@ -88,17 +89,23 @@ pub fn main() !void {
     var files = try getCwdFiles(arena_alloc, path.items);
     var sel = try allocBoolSlice(arena_alloc, files.len, false);
     var n_sel: usize = 0;
+    var past_sel: usize = 0;
     var win = Window{ .start = 0, .len = 39 };
+
+    var cursor: usize = 0;
 
     try clearScreen(stdout);
     try printPath(stdout, path.items);
-    try printSelection(stdout, n_sel);
-    try printFiles(stdout, files, 0, sel, win);
+    try printPosition(stdout, cursor, files.len);
+    try printSelection(stdout, n_sel, past_sel);
+    try printFiles(stdout, files, cursor, sel, win);
     try bw.flush();
+
+    var hist = History.init(gpa_alloc);
+    defer hist.deinit();
 
     var running = true;
     var char_buf: [3]u8 = undefined;
-    var cursor: usize = 0;
     while (running) {
         _ = try stdin.read(&char_buf);
 
@@ -128,24 +135,44 @@ pub fn main() !void {
             },
 
             .left, .right => |move| {
-                if (files[cursor].kind != .directory) continue;
-
                 if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+
+                if (n_sel > 0) {
+                    // Store dir in history for later use
+                    const dup_path = try gpa_alloc.dupe(u8, path.items);
+                    const dup_sel = try gpa_alloc.dupe(bool, sel);
+                    const sel_files = try getSelectedFiles(gpa_alloc, sel, files);
+                    try hist.store(dup_path, sel_files, dup_sel);
+
+                    past_sel += n_sel;
+                }
+
                 if (move == .left) {
                     const dir_name = std.fs.path.basename(path.items);
                     moveLeft(&path);
                     files = try getCwdFiles(arena_alloc, path.items);
                     cursor = findCursorPos(dir_name, files) orelse cursor;
                 } else {
+                    if (files[cursor].kind != .directory) continue;
                     const dir_name = files[cursor].name;
                     try moveRight(&path, dir_name);
                     files = try getCwdFiles(arena_alloc, path.items);
                     cursor = 0;
                 }
 
-                if (n_sel > 0) try saveDir();
-                n_sel = 0;
-                sel = try allocBoolSlice(arena_alloc, files.len, false);
+                if (hist.get(path.items)) |kv| {
+                    sel = try arena_alloc.dupe(bool, kv.value.selection);
+                    n_sel = countSelected(sel);
+                    past_sel -= n_sel;
+
+                    // You have to clean up after you get the data
+                    gpa_alloc.free(kv.key);
+                    gpa_alloc.free(kv.value.files);
+                    gpa_alloc.free(kv.value.selection);
+                } else {
+                    sel = try allocBoolSlice(arena_alloc, files.len, false);
+                    n_sel = 0;
+                }
             },
 
             .bottom => {
@@ -159,6 +186,7 @@ pub fn main() !void {
             },
 
             .select_toggle => {
+                if (sel.len == 0) continue;
                 sel[cursor] = !sel[cursor];
                 n_sel = if (sel[cursor]) n_sel + 1 else n_sel - 1;
                 cursor += if (cursor + 1 < files.len) 1 else 0;
@@ -183,7 +211,8 @@ pub fn main() !void {
 
         try clearScreen(stdout);
         try printPath(stdout, path.items);
-        try printSelection(stdout, n_sel);
+        try printPosition(stdout, cursor, files.len);
+        try printSelection(stdout, n_sel, past_sel);
         try printFiles(stdout, files, cursor, sel, win);
 
         try bw.flush();
@@ -256,9 +285,15 @@ fn printPath(writer: anytype, path: []const u8) !void {
     return try writer.print("{s}\x1b[1E", .{path});
 }
 
-fn printSelection(writer: anytype, n_selection: usize) !void {
-    return if (n_selection > 0)
-        try writer.print("\x1b[30;42m {} \x1b[0m\x1b[2E", .{n_selection})
+fn printPosition(writer: anytype, cursor: usize, tot_files: usize) !void {
+    return if (tot_files > 0)
+        try writer.print(" {}/{} ", .{ cursor + 1, tot_files });
+}
+
+fn printSelection(writer: anytype, n_selection: usize, past_selection: usize) !void {
+    const total = n_selection + past_selection;
+    return if (total > 0)
+        try writer.print("\x1b[30;42m {} \x1b[0m\x1b[2E", .{total})
     else
         try writer.writeAll("\x1b[2E");
 }
@@ -276,6 +311,7 @@ fn printFiles(
 
     const start = win.start;
     const end = if (start + win.len > files.len)
+        // FIXME: move start before if new files are less
         files.len - start
     else
         win.len;
@@ -341,4 +377,26 @@ fn allocBoolSlice(arena: Allocator, size: usize, value: bool) Allocator.Error![]
         b.* = value;
 
     return mem;
+}
+
+fn getSelectedFiles(allocator: Allocator, selection: []const bool, files: []const Entry) ![]const u8 {
+    var list = ByteList.init(allocator);
+    // defer list.deinit();
+
+    for (selection, files) |sel, file| {
+        if (sel) {
+            try list.appendSlice(file.name);
+            try list.append(0);
+        }
+    }
+
+    return try list.toOwnedSlice();
+}
+fn countSelected(selection: []const bool) usize {
+    var acc: usize = 0;
+    for (selection) |sel| {
+        if (sel) acc += 1;
+    }
+
+    return acc;
 }
