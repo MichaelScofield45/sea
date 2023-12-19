@@ -16,7 +16,7 @@ pub fn init(allocator: std.mem.Allocator) History {
     };
 }
 
-pub fn deinit(self: *History) void {
+pub fn freeOwnedData(self: *History) void {
     const allocator = self.map.allocator;
 
     var key_iter = self.map.keyIterator();
@@ -30,7 +30,14 @@ pub fn deinit(self: *History) void {
         allocator.free(val.selection);
         allocator.free(val.files);
     }
+}
 
+pub fn reset(self: *History) void {
+    return self.map.clearRetainingCapacity();
+}
+
+pub fn deinit(self: *History) void {
+    self.freeOwnedData();
     return self.map.deinit();
 }
 

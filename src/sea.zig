@@ -206,6 +206,18 @@ pub fn main(args: ArgFlags) !void {
                 n_sel = files.len;
             },
 
+            .delete => {
+                var arena_instance = std.heap.ArenaAllocator.init(page_allocator);
+                defer arena_instance.deinit();
+
+                const instance_allocator = arena_instance.allocator();
+                try deleteHistory(&hist, instance_allocator);
+                // try deleteCwdSelectedFiles(path, files, sel);
+
+                past_sel = 0;
+                n_sel = 0;
+            },
+
             else => {},
         }
 
@@ -428,4 +440,31 @@ fn printCwdSelectedFiles(writer: anytype, path: []const u8, files: []const Entry
     for (files, selection) |file, sel| {
         if (sel) try writer.print("{s}/{s}\n", .{ path, file.name });
     }
+}
+
+fn deleteHistory(hist: *History, arena: Allocator) !void {
+    var map_iter = hist.map.iterator();
+
+    var list = ByteList.init(arena);
+    defer list.deinit();
+
+    const writer = list.writer();
+
+    while (map_iter.next()) |map_entry| {
+        const dir = map_entry.key_ptr.*;
+
+        try writer.print("{s}/", .{dir});
+
+        var file_iter = std.mem.tokenizeScalar(u8, map_entry.value_ptr.files, 0);
+
+        while (file_iter.next()) |file| {
+            try list.resize(dir.len + 1);
+            try writer.writeAll(file);
+
+            try std.fs.deleteTreeAbsolute(list.items);
+        }
+    }
+
+    hist.freeOwnedData();
+    hist.reset();
 }
