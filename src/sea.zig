@@ -88,7 +88,7 @@ pub fn main(args: ArgFlags) !void {
     var path = try getCwdPath(arena_alloc, gpa_alloc);
     defer path.deinit();
 
-    var files = try getCwdFiles(arena_alloc, path.items);
+    var files = try getCwdFiles(arena_alloc, path.items, false);
     var sel = try allocBoolSlice(arena_alloc, files.len, false);
     var n_sel: usize = 0;
     var past_sel: usize = 0;
@@ -107,6 +107,7 @@ pub fn main(args: ArgFlags) !void {
     defer hist.deinit();
 
     var running = true;
+    var hidden = false;
     var char_buf: [3]u8 = undefined;
     while (running) {
         _ = try stdin.read(&char_buf);
@@ -152,13 +153,13 @@ pub fn main(args: ArgFlags) !void {
                 if (move == .left) {
                     const dir_name = std.fs.path.basename(path.items);
                     moveLeft(&path);
-                    files = try getCwdFiles(arena_alloc, path.items);
+                    files = try getCwdFiles(arena_alloc, path.items, hidden);
                     cursor = findCursorPos(dir_name, files) orelse cursor;
                 } else {
                     if (files[cursor].kind != .directory) continue;
                     const dir_name = files[cursor].name;
                     try moveRight(&path, dir_name);
-                    files = try getCwdFiles(arena_alloc, path.items);
+                    files = try getCwdFiles(arena_alloc, path.items, hidden);
                     cursor = 0;
                 }
 
@@ -218,7 +219,7 @@ pub fn main(args: ArgFlags) !void {
 
                 if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
 
-                files = try getCwdFiles(arena_alloc, path.items);
+                files = try getCwdFiles(arena_alloc, path.items, hidden);
                 sel = try allocBoolSlice(arena_alloc, files.len, false);
 
                 past_sel = 0;
@@ -226,6 +227,9 @@ pub fn main(args: ArgFlags) !void {
             },
 
             .move => {
+                // TODO: have some kind of window error popup when files are not
+                // found, the most probable erorr will be that the files were
+                // alreado moved higher en the directory hierarchy.
                 try moveHistory(arena_alloc, &hist, path.items);
 
                 if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
@@ -233,7 +237,17 @@ pub fn main(args: ArgFlags) !void {
                 past_sel = 0;
                 n_sel = 0;
 
-                files = try getCwdFiles(arena_alloc, path.items);
+                files = try getCwdFiles(arena_alloc, path.items, hidden);
+                sel = try allocBoolSlice(arena_alloc, files.len, false);
+                cursor = 0;
+            },
+
+            .hidden_toggle => {
+                hidden = !hidden;
+
+                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+
+                files = try getCwdFiles(arena_alloc, path.items, hidden);
                 sel = try allocBoolSlice(arena_alloc, files.len, false);
                 cursor = 0;
             },
@@ -383,17 +397,28 @@ fn styleFromKind(kind: Entry.Kind) []const u8 {
     };
 }
 
-fn getCwdFiles(arena: Allocator, path: []const u8) ![]Entry {
+fn getCwdFiles(arena: Allocator, path: []const u8, hidden: bool) ![]Entry {
     var cwd = try std.fs.openDirAbsolute(path, .{ .iterate = true });
     var dir_iter = cwd.iterate();
     var list = std.ArrayList(std.fs.Dir.Entry).init(arena);
     while (try dir_iter.next()) |entry| {
-        const dup_name = try arena.dupe(u8, entry.name);
-        const new_entry: Entry = .{
-            .name = dup_name,
-            .kind = entry.kind,
-        };
-        try list.append(new_entry);
+        if (entry.name[0] != '.') {
+            const dup_name = try arena.dupe(u8, entry.name);
+            const new_entry: Entry = .{
+                .name = dup_name,
+                .kind = entry.kind,
+            };
+            try list.append(new_entry);
+        } else {
+            if (hidden) {
+                const dup_name = try arena.dupe(u8, entry.name);
+                const new_entry: Entry = .{
+                    .name = dup_name,
+                    .kind = entry.kind,
+                };
+                try list.append(new_entry);
+            }
+        }
     }
 
     const files_slice = try list.toOwnedSlice();
