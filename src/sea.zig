@@ -225,6 +225,19 @@ pub fn main(args: ArgFlags) !void {
                 n_sel = 0;
             },
 
+            .move => {
+                try moveHistory(arena_alloc, &hist, path.items);
+
+                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+
+                past_sel = 0;
+                n_sel = 0;
+
+                files = try getCwdFiles(arena_alloc, path.items);
+                sel = try allocBoolSlice(arena_alloc, files.len, false);
+                cursor = 0;
+            },
+
             else => {},
         }
 
@@ -496,6 +509,40 @@ fn deleteCwdSelectedFiles(
             try std.fs.deleteTreeAbsolute(list.items);
         }
     }
+}
+
+fn moveHistory(arena: Allocator, hist: *History, path: []const u8) !void {
+    var map_iter = hist.map.iterator();
+
+    var list = ByteList.init(arena);
+    defer list.deinit();
+    const list_writer = list.writer();
+
+    var new_path_list = ByteList.init(arena);
+    defer new_path_list.deinit();
+    const new_path_writer = new_path_list.writer();
+    try new_path_writer.print("{s}/", .{path});
+
+    while (map_iter.next()) |map_entry| {
+        const dir = map_entry.key_ptr.*;
+
+        try list_writer.print("{s}/", .{dir});
+
+        var file_iter = std.mem.tokenizeScalar(u8, map_entry.value_ptr.files, 0);
+
+        while (file_iter.next()) |file| {
+            list.resize(dir.len + 1) catch unreachable;
+            try list_writer.writeAll(file);
+
+            new_path_list.resize(path.len + 1) catch unreachable;
+            try new_path_writer.writeAll(file);
+
+            try std.fs.renameAbsolute(list.items, new_path_list.items);
+        }
+    }
+
+    hist.freeOwnedData();
+    hist.reset();
 }
 
 fn resetSelection(selection: []bool) void {
