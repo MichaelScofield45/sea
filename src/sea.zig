@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const ByteList = std.ArrayList(u8);
 const Window = @import("Window.zig");
 const History = @import("History.zig");
+const ArgFlags = @import("main.zig").ArgFlags;
 
 const Self = @This();
 
@@ -62,7 +63,7 @@ pub const Action = enum {
     }
 };
 
-pub fn main() !void {
+pub fn main(args: ArgFlags) !void {
     const stdout_f = std.io.getStdOut();
 
     var bw = std.io.bufferedWriter(stdout_f.writer());
@@ -77,7 +78,6 @@ pub fn main() !void {
 
     const original_termios = try std.os.tcgetattr(stdin_f.handle);
     try seaInit(stdout_f, stdin_f, original_termios);
-    defer seaDeinit(stdout_f, stdin_f, original_termios);
 
     var arena = std.heap.ArenaAllocator.init(page_allocator);
     defer arena.deinit();
@@ -215,6 +215,14 @@ pub fn main() !void {
         try printSelection(stdout, n_sel, past_sel);
         try printFiles(stdout, files, cursor, sel, win);
 
+        try bw.flush();
+    }
+
+    seaDeinit(stdout_f, stdin_f, original_termios);
+
+    if (args.print_selection) {
+        try printHistory(stdout, hist);
+        try printCwdSelectedFiles(stdout, path.items, files, sel);
         try bw.flush();
     }
 
@@ -399,4 +407,25 @@ fn countSelected(selection: []const bool) usize {
     }
 
     return acc;
+}
+
+fn printHistory(writer: anytype, hist: History) !void {
+    var map_iter = hist.map.iterator();
+
+    while (map_iter.next()) |map_entry| {
+        const dir = map_entry.key_ptr.*;
+
+        var file_iter = std.mem.tokenizeScalar(u8, map_entry.value_ptr.files, 0);
+
+        while (file_iter.next()) |file| {
+            // std.debug.print("filename: {s}\n", .{file});
+            try writer.print("{s}/{s}\n", .{ dir, file });
+        }
+    }
+}
+
+fn printCwdSelectedFiles(writer: anytype, path: []const u8, files: []const Entry, selection: []const bool) !void {
+    for (files, selection) |file, sel| {
+        if (sel) try writer.print("{s}/{s}\n", .{ path, file.name });
+    }
 }
