@@ -213,12 +213,13 @@ pub fn main(args: ArgFlags) !void {
             },
 
             .delete => {
-                var arena_instance = std.heap.ArenaAllocator.init(page_allocator);
-                defer arena_instance.deinit();
+                try deleteHistory(arena_alloc, &hist);
+                try deleteCwdSelectedFiles(arena_alloc, path.items, files, sel);
 
-                const instance_allocator = arena_instance.allocator();
-                try deleteHistory(&hist, instance_allocator);
-                // try deleteCwdSelectedFiles(path, files, sel);
+                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+
+                files = try getCwdFiles(arena_alloc, path.items);
+                sel = try allocBoolSlice(arena_alloc, files.len, false);
 
                 past_sel = 0;
                 n_sel = 0;
@@ -448,7 +449,7 @@ fn printCwdSelectedFiles(writer: anytype, path: []const u8, files: []const Entry
     }
 }
 
-fn deleteHistory(hist: *History, arena: Allocator) !void {
+fn deleteHistory(arena: Allocator, hist: *History) !void {
     var map_iter = hist.map.iterator();
 
     var list = ByteList.init(arena);
@@ -473,4 +474,31 @@ fn deleteHistory(hist: *History, arena: Allocator) !void {
 
     hist.freeOwnedData();
     hist.reset();
+}
+
+fn deleteCwdSelectedFiles(
+    arena: Allocator,
+    path: []const u8,
+    files: []const Entry,
+    selection: []const bool,
+) !void {
+    var list = ByteList.init(arena);
+    defer list.deinit();
+    const writer = list.writer();
+
+    try writer.print("{s}/", .{path});
+
+    for (files, selection) |file, sel| {
+        if (sel) {
+            list.resize(path.len + 1) catch unreachable;
+            try writer.writeAll(file.name);
+
+            try std.fs.deleteTreeAbsolute(list.items);
+        }
+    }
+}
+
+fn resetSelection(selection: []bool) void {
+    for (selection) |*sel|
+        sel.* = false;
 }
