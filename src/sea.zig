@@ -20,6 +20,7 @@ pub const Action = enum {
     right,
     top,
     bottom,
+    middle,
     select_toggle,
     select_all,
     select_invert,
@@ -47,6 +48,7 @@ pub const Action = enum {
             'l' => .right,
             'g' => .top,
             'G' => .bottom,
+            'M' => .middle,
 
             ' ' => .select_toggle,
             'a' => .select_all,
@@ -175,14 +177,18 @@ pub fn main(args: ArgFlags) !void {
                 }
             },
 
+            .top => {
+                cursor = 0;
+                win.scrollUp(cursor);
+            },
+
             .bottom => {
                 cursor = files.len -| 1;
                 win.scrollDown(cursor);
             },
 
-            .top => {
-                cursor = 0;
-                win.scrollUp(cursor);
+            .middle => {
+                cursor = (files.len -| 1) / 2;
             },
 
             .select_toggle => {
