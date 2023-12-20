@@ -138,7 +138,7 @@ pub fn main(args: ArgFlags) !void {
             },
 
             .left, .right => |move| {
-                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+                try resetArena(&arena);
 
                 if (n_sel > 0) {
                     // Store dir in history for later use
@@ -217,7 +217,7 @@ pub fn main(args: ArgFlags) !void {
                 try deleteHistory(arena_alloc, &hist);
                 try deleteCwdSelectedFiles(arena_alloc, path.items, files, sel);
 
-                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+                try resetArena(&arena);
 
                 files = try getCwdFiles(arena_alloc, path.items, hidden);
                 sel = try allocBoolSlice(arena_alloc, files.len, false);
@@ -232,7 +232,7 @@ pub fn main(args: ArgFlags) !void {
                 // alreado moved higher en the directory hierarchy.
                 try moveHistory(arena_alloc, &hist, path.items);
 
-                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+                try resetArena(&arena);
 
                 past_sel = 0;
                 n_sel = 0;
@@ -245,7 +245,7 @@ pub fn main(args: ArgFlags) !void {
             .hidden_toggle => {
                 hidden = !hidden;
 
-                if (!arena.reset(.retain_capacity)) return error.ArenaResetError;
+                try resetArena(&arena);
 
                 files = try getCwdFiles(arena_alloc, path.items, hidden);
                 sel = try allocBoolSlice(arena_alloc, files.len, false);
@@ -573,4 +573,8 @@ fn moveHistory(arena: Allocator, hist: *History, path: []const u8) !void {
 fn resetSelection(selection: []bool) void {
     for (selection) |*sel|
         sel.* = false;
+}
+
+fn resetArena(arena: *std.heap.ArenaAllocator) error{ArenaResetError}!void {
+    return if (!arena.reset(.retain_capacity)) error.ArenaResetError;
 }
