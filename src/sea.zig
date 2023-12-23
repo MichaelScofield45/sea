@@ -295,7 +295,8 @@ fn seaInit(stdout: std.fs.File, stdin: std.fs.File, original_termios: std.os.lin
     new_termios.iflag &= ~(linux.BRKINT | linux.ICRNL | linux.INPCK | linux.ISTRIP | linux.IXON);
     new_termios.oflag &= ~(linux.OPOST);
     new_termios.cflag |= (linux.CS8);
-    new_termios.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
+    // new_termios.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
+    new_termios.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN);
     try std.os.tcsetattr(stdin.handle, .FLUSH, new_termios);
 }
 
