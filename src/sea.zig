@@ -137,6 +137,13 @@ pub fn main(args: ArgFlags) !void {
                 }
             },
 
+            .up, .down => |direction| cursor = moveCursor(
+                cursor,
+                direction,
+                files.len,
+                &win,
+            ),
+
             .left, .right => |move| {
                 try resetArena(&arena);
 
@@ -162,6 +169,7 @@ pub fn main(args: ArgFlags) !void {
                     files = try getCwdFiles(arena_alloc, path.items, hidden);
                     cursor = 0;
                 }
+                win.scroll(cursor);
 
                 if (hist.get(path.items)) |kv| {
                     sel = try arena_alloc.dupe(bool, kv.value.selection);
@@ -180,12 +188,12 @@ pub fn main(args: ArgFlags) !void {
 
             .top => {
                 cursor = 0;
-                win.scrollUp(cursor);
+                win.scroll(cursor);
             },
 
             .bottom => {
                 cursor = files.len -| 1;
-                win.scrollDown(cursor);
+                win.scroll(cursor);
             },
 
             .middle => {
@@ -365,7 +373,6 @@ fn printFiles(
 
     const start = win.start;
     const end = if (start + win.len > files.len)
-        // FIXME: move start before if new files are less
         files.len - start
     else
         win.len;
@@ -577,4 +584,16 @@ fn resetSelection(selection: []bool) void {
 
 fn resetArena(arena: *std.heap.ArenaAllocator) error{ArenaResetError}!void {
     return if (!arena.reset(.retain_capacity)) error.ArenaResetError;
+}
+
+fn moveCursor(cursor: usize, direction: Action, tot_files: usize, window: *Window) usize {
+    const new_cursor = blk: {
+        if (direction == .up) {
+            break :blk if (cursor != 0) cursor - 1 else tot_files -| 1;
+        } else {
+            break :blk if (cursor != tot_files -| 1) cursor + 1 else 0;
+        }
+    };
+    window.scroll(new_cursor);
+    return new_cursor;
 }
