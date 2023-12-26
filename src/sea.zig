@@ -312,12 +312,18 @@ pub fn main(args: ArgFlags) !void {
         try bw.flush();
     }
 
-    // TODO: setup cd on quit if available
-    // var cd_quit: ?[]const u8 = null;
-    // defer if (cd_quit) |allocation| gpa_alloc.free(allocation);
-    //
-    // if (std.process.hasEnvVarConstant("SEA_TMPFILE"))
-    //     cd_quit = try std.process.getEnvVarOwned(gpa_alloc, "SEA_TMPFILE");
+    const cd_quit: ?[]const u8 = if (std.process.hasEnvVarConstant("SEA_TMPFILE"))
+        try std.process.getEnvVarOwned(gpa_alloc, "SEA_TMPFILE")
+    else
+        null;
+    defer if (cd_quit) |allocation| gpa_alloc.free(allocation);
+
+    if (cd_quit) |config_dir| {
+        var file = try std.fs.createFileAbsolute(config_dir, .{});
+        defer file.close();
+
+        try file.writeAll(path.items);
+    }
 }
 
 fn seaInit(stdout: std.fs.File, stdin: std.fs.File, original_termios: std.os.linux.termios) !void {
