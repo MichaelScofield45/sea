@@ -28,6 +28,7 @@ pub const Action = enum {
     move,
     paste,
     hidden_toggle,
+    search,
 
     pub fn fromInput(input: [3]u8) ?Action {
         // 0x1b is the escape character in terminals
@@ -59,10 +60,17 @@ pub const Action = enum {
             'p' => .paste,
 
             '.' => .hidden_toggle,
+            '/' => .search,
 
             else => null,
         };
     }
+};
+
+const Status = enum {
+    running,
+    searching,
+    quit,
 };
 
 pub fn main(args: ArgFlags) !void {
@@ -106,41 +114,24 @@ pub fn main(args: ArgFlags) !void {
     var hist = History.init(gpa_alloc);
     defer hist.deinit();
 
-    var running = true;
+    var search_files: ?[]const Entry = null;
+    defer if (search_files != null) gpa_alloc.free(search_files.?);
+
+    var status = Status.running;
     var hidden = false;
     var char_buf: [3]u8 = undefined;
-    while (running) {
+    while (status != .quit) {
         _ = try stdin.read(&char_buf);
 
         const action = Action.fromInput(char_buf) orelse continue;
 
         switch (action) {
-            .quit => running = false,
-
-            .up, .down => |direction| {
-                if (direction == .up) {
-                    if (cursor != 0) {
-                        cursor -= 1;
-                        win.scrollUp(cursor);
-                    } else {
-                        cursor = files.len -| 1;
-                        win.scrollDown(cursor);
-                    }
-                } else {
-                    if (cursor != files.len -| 1) {
-                        cursor += 1;
-                        win.scrollDown(cursor);
-                    } else {
-                        cursor = 0;
-                        win.scrollUp(cursor);
-                    }
-                }
-            },
+            .quit => status = .quit,
 
             .up, .down => |direction| cursor = moveCursor(
                 cursor,
                 direction,
-                files.len,
+                if (status != .searching) files.len else search_files.?.len,
                 &win,
             ),
 
@@ -237,7 +228,8 @@ pub fn main(args: ArgFlags) !void {
             .move => {
                 // TODO: have some kind of window error popup when files are not
                 // found, the most probable erorr will be that the files were
-                // alreado moved higher en the directory hierarchy.
+                // already moved/deleted/renamed higher en the directory
+                // hierarchy.
                 try moveHistory(arena_alloc, &hist, path.items);
 
                 try resetArena(&arena);
@@ -260,6 +252,43 @@ pub fn main(args: ArgFlags) !void {
                 cursor = 0;
             },
 
+            .search => {
+                try startSearch(stdout_f);
+                var search_buf: [1024]u8 = undefined;
+                const pattern = blk: {
+                    var search_len: usize = 0;
+                    while (search_len < search_buf.len) {
+                        var s_char_buf: [4]u8 = undefined;
+                        const read_len = try stdin.read(&s_char_buf);
+
+                        if (read_len == 1 and s_char_buf[0] == '\n') break;
+
+                        @memcpy(search_buf[search_len..][0..read_len], s_char_buf[0..read_len]);
+                        try stdout_f.writeAll(s_char_buf[0..read_len]);
+                        search_len += read_len;
+                    }
+
+                    break :blk search_buf[0..search_len];
+                };
+
+                search_files = switch (status) {
+                    .running => try searchFiles(gpa_alloc, files, pattern),
+                    .searching => blk: {
+                        const old_files = search_files.?;
+                        defer gpa_alloc.free(old_files);
+
+                        break :blk try searchFiles(gpa_alloc, old_files, pattern);
+                    },
+                    else => unreachable,
+                };
+
+                // TODO: deal with window positioning, should we store the old
+                // one??
+                // TODO: have an input to return to the original list
+                status = .searching;
+                cursor = 0;
+            },
+
             else => {},
         }
 
@@ -267,7 +296,10 @@ pub fn main(args: ArgFlags) !void {
         try printPath(stdout, path.items);
         try printPosition(stdout, cursor, files.len);
         try printSelection(stdout, n_sel, past_sel);
-        try printFiles(stdout, files, cursor, sel, win);
+        if (status != .searching)
+            try printFiles(stdout, files, cursor, sel, win)
+        else
+            try printFiles(stdout, search_files.?, cursor, sel, win);
 
         try bw.flush();
     }
@@ -292,7 +324,8 @@ fn seaInit(stdout: std.fs.File, stdin: std.fs.File, original_termios: std.os.lin
     try stdout.writeAll("\x1b[?25l\x1b[?1049h");
 
     var new_termios = original_termios;
-    new_termios.iflag &= ~(linux.BRKINT | linux.ICRNL | linux.INPCK | linux.ISTRIP | linux.IXON);
+    // new_termios.iflag &= ~(linux.BRKINT | linux.ICRNL | linux.INPCK | linux.ISTRIP | linux.IXON);
+    new_termios.iflag &= ~(linux.BRKINT | linux.INPCK | linux.ISTRIP | linux.IXON);
     new_termios.oflag &= ~(linux.OPOST);
     new_termios.cflag |= (linux.CS8);
     // new_termios.lflag &= ~(linux.ECHO | linux.ICANON | linux.IEXTEN | linux.ISIG);
@@ -597,4 +630,20 @@ fn moveCursor(cursor: usize, direction: Action, tot_files: usize, window: *Windo
     };
     window.scroll(new_cursor);
     return new_cursor;
+}
+
+fn searchFiles(gpa: Allocator, files: []const Entry, pattern: []const u8) ![]const Entry {
+    var list = std.ArrayList(Entry).init(gpa);
+    // defer list.deinit();
+
+    for (files) |file| {
+        if (std.mem.containsAtLeast(u8, file.name, 1, pattern))
+            try list.append(file);
+    }
+
+    return try list.toOwnedSlice();
+}
+
+fn startSearch(writer: anytype) !void {
+    try writer.writeAll("\x1b[42:0Hpattern: ");
 }
