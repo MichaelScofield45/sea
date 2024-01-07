@@ -5,6 +5,7 @@ const linux = std.os.linux;
 const page_allocator = std.heap.page_allocator;
 const builtin = @import("builtin");
 
+const DynamicBitSet = std.bit_set.DynamicBitSet;
 const ByteList = std.ArrayList(u8);
 const Window = @import("Window.zig");
 const History = @import("History.zig");
@@ -97,7 +98,7 @@ pub fn main(args: ArgFlags) !void {
     defer path.deinit();
 
     var files = try getCwdFiles(arena_alloc, path.items, false);
-    var sel = try allocBoolSlice(arena_alloc, files.len, false);
+    var sel = try DynamicBitSet.initEmpty(arena_alloc, files.len);
     var n_sel: usize = 0;
     var past_sel: usize = 0;
     var win = Window{ .start = 0, .len = 39 };
@@ -141,7 +142,7 @@ pub fn main(args: ArgFlags) !void {
                 if (n_sel > 0) {
                     // Store dir in history for later use
                     const dup_path = try gpa_alloc.dupe(u8, path.items);
-                    const dup_sel = try gpa_alloc.dupe(bool, sel);
+                    const dup_sel = try sel.unmanaged.clone(gpa_alloc);
                     const sel_files = try getSelectedFiles(gpa_alloc, sel, files);
                     try hist.store(dup_path, sel_files, dup_sel);
 
@@ -162,17 +163,21 @@ pub fn main(args: ArgFlags) !void {
                 }
                 win.scroll(cursor);
 
-                if (hist.get(path.items)) |kv| {
-                    sel = try arena_alloc.dupe(bool, kv.value.selection);
-                    n_sel = countSelected(sel);
+                if (hist.map.getEntry(path.items)) |entry| {
+                    sel = .{
+                        .unmanaged = try entry.value_ptr.selection.clone(arena_alloc),
+                        .allocator = arena_alloc,
+                    };
+                    n_sel = sel.count();
                     past_sel -= n_sel;
 
                     // You have to clean up after you get the data
-                    gpa_alloc.free(kv.key);
-                    gpa_alloc.free(kv.value.files);
-                    gpa_alloc.free(kv.value.selection);
+                    gpa_alloc.free(entry.key_ptr.*);
+                    gpa_alloc.free(entry.value_ptr.files);
+                    entry.value_ptr.selection.deinit(gpa_alloc);
+                    hist.map.removeByPtr(entry.key_ptr);
                 } else {
-                    sel = try allocBoolSlice(arena_alloc, files.len, false);
+                    sel = try DynamicBitSet.initEmpty(arena_alloc, files.len);
                     n_sel = 0;
                 }
             },
@@ -192,23 +197,18 @@ pub fn main(args: ArgFlags) !void {
             },
 
             .select_toggle => {
-                if (sel.len == 0) continue;
-                sel[cursor] = !sel[cursor];
-                n_sel = if (sel[cursor]) n_sel + 1 else n_sel - 1;
+                sel.toggle(cursor);
+                n_sel = if (sel.isSet(cursor)) n_sel + 1 else n_sel - 1;
                 cursor += if (cursor + 1 < files.len) 1 else 0;
             },
 
             .select_invert => {
-                for (sel) |*bool_val|
-                    bool_val.* = !bool_val.*;
-
+                sel.toggleAll();
                 n_sel = files.len - n_sel;
             },
 
             .select_all => {
-                for (sel) |*bool_val|
-                    bool_val.* = true;
-
+                sel.setRangeValue(.{ .start = 0, .end = sel.capacity() }, true);
                 n_sel = files.len;
             },
 
@@ -219,7 +219,7 @@ pub fn main(args: ArgFlags) !void {
                 try resetArena(&arena);
 
                 files = try getCwdFiles(arena_alloc, path.items, hidden);
-                sel = try allocBoolSlice(arena_alloc, files.len, false);
+                sel = try DynamicBitSet.initEmpty(arena_alloc, files.len);
 
                 past_sel = 0;
                 n_sel = 0;
@@ -238,7 +238,7 @@ pub fn main(args: ArgFlags) !void {
                 n_sel = 0;
 
                 files = try getCwdFiles(arena_alloc, path.items, hidden);
-                sel = try allocBoolSlice(arena_alloc, files.len, false);
+                sel = try DynamicBitSet.initEmpty(arena_alloc, files.len);
                 cursor = 0;
             },
 
@@ -248,7 +248,7 @@ pub fn main(args: ArgFlags) !void {
                 try resetArena(&arena);
 
                 files = try getCwdFiles(arena_alloc, path.items, hidden);
-                sel = try allocBoolSlice(arena_alloc, files.len, false);
+                sel = try DynamicBitSet.initEmpty(arena_alloc, files.len);
                 cursor = 0;
             },
 
@@ -400,7 +400,7 @@ fn printFiles(
     writer: anytype,
     files: []const std.fs.Dir.Entry,
     cursor: usize,
-    selection: []bool,
+    selection: DynamicBitSet,
     win: Window,
 ) !void {
     const line_down = "\x1b[1E";
@@ -413,8 +413,8 @@ fn printFiles(
     else
         win.len;
 
-    for (files[start..][0..end], selection[start..][0..end], start..) |file, sel, idx| {
-        if (!sel) {
+    for (files[start..][0..end], start..) |file, idx| {
+        if (!selection.isSet(idx)) {
             try writer.writeAll(" ");
         } else {
             try writer.writeAll("\x1b[30;42m>\x1b[0m");
@@ -479,34 +479,18 @@ fn sortFiles(files: []Entry) void {
     std.sort.block(Entry, files, {}, ascComp);
 }
 
-fn allocBoolSlice(arena: Allocator, size: usize, value: bool) Allocator.Error![]bool {
-    const mem = try arena.alloc(bool, size);
-    for (mem) |*b|
-        b.* = value;
-
-    return mem;
-}
-
-fn getSelectedFiles(allocator: Allocator, selection: []const bool, files: []const Entry) ![]const u8 {
+fn getSelectedFiles(allocator: Allocator, selection: DynamicBitSet, files: []const Entry) ![]const u8 {
     var list = ByteList.init(allocator);
     // defer list.deinit();
 
-    for (selection, files) |sel, file| {
-        if (sel) {
+    for (files, 0..) |file, idx| {
+        if (selection.isSet(idx)) {
             try list.appendSlice(file.name);
             try list.append(0);
         }
     }
 
     return try list.toOwnedSlice();
-}
-fn countSelected(selection: []const bool) usize {
-    var acc: usize = 0;
-    for (selection) |sel| {
-        if (sel) acc += 1;
-    }
-
-    return acc;
 }
 
 fn printHistory(writer: anytype, hist: History) !void {
@@ -524,9 +508,10 @@ fn printHistory(writer: anytype, hist: History) !void {
     }
 }
 
-fn printCwdSelectedFiles(writer: anytype, path: []const u8, files: []const Entry, selection: []const bool) !void {
-    for (files, selection) |file, sel| {
-        if (sel) try writer.print("{s}/{s}\n", .{ path, file.name });
+fn printCwdSelectedFiles(writer: anytype, path: []const u8, files: []const Entry, selection: DynamicBitSet) !void {
+    for (files, 0..) |file, idx| {
+        if (selection.isSet(idx))
+            try writer.print("{s}/{s}\n", .{ path, file.name });
     }
 }
 
@@ -561,7 +546,7 @@ fn deleteCwdSelectedFiles(
     arena: Allocator,
     path: []const u8,
     files: []const Entry,
-    selection: []const bool,
+    selection: DynamicBitSet,
 ) !void {
     var list = ByteList.init(arena);
     defer list.deinit();
@@ -569,8 +554,8 @@ fn deleteCwdSelectedFiles(
 
     try writer.print("{s}/", .{path});
 
-    for (files, selection) |file, sel| {
-        if (sel) {
+    for (files, 0..) |file, idx| {
+        if (selection.isSet(idx)) {
             list.resize(path.len + 1) catch unreachable;
             try writer.writeAll(file.name);
 
@@ -611,11 +596,6 @@ fn moveHistory(arena: Allocator, hist: *History, path: []const u8) !void {
 
     hist.freeOwnedData();
     hist.reset();
-}
-
-fn resetSelection(selection: []bool) void {
-    for (selection) |*sel|
-        sel.* = false;
 }
 
 fn resetArena(arena: *std.heap.ArenaAllocator) error{ArenaResetError}!void {
