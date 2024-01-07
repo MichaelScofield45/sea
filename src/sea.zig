@@ -313,8 +313,7 @@ pub fn main(args: ArgFlags) !void {
     }
 
     if (std.process.hasEnvVarConstant("SEA_TMPFILE")) {
-        const config_dir = try std.process.getEnvVarOwned(gpa_alloc, "SEA_TMPFILE");
-        defer gpa_alloc.free(config_dir);
+        const config_dir = try std.process.getEnvVarOwned(arena_alloc, "SEA_TMPFILE");
 
         var file = try std.fs.createFileAbsolute(config_dir, .{});
         defer file.close();
